@@ -1,3 +1,11 @@
+"""
+app.models.models
+~~~~~~~~~~~~~~~~~
+
+应用的 SQLAlchemy ORM 模型定义文件。
+用于定义核心数据表结构及通用的序列化辅助方法。
+"""
+
 from datetime import datetime
 import uuid
 from flask_sqlalchemy import SQLAlchemy

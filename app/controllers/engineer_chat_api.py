@@ -1,3 +1,14 @@
+"""
+app.controllers.engineer_chat_api
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+工程师对话 API 路由层：
+1. 负责 JWT 鉴权与请求参数校验
+2. 负责事件/用户存在性校验
+3. 调用 engineer_chat_controller 执行业务逻辑
+4. 统一封装 HTTP 响应结构
+"""
+
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app.controllers.engineer_chat_controller import engineer_chat_controller
@@ -10,6 +21,9 @@ logger = logging.getLogger(__name__)
 # 创建蓝图
 engineer_chat_bp = Blueprint('engineer_chat', __name__)
 
+# 发送消息接口：
+# - 保存用户消息并触发 AI 处理
+# - 异步模式下，AI 回复由 WebSocket 推送
 @engineer_chat_bp.route('/send', methods=['POST'])
 @jwt_required()
 def send_message():
@@ -58,7 +72,7 @@ def send_message():
                 'message': '用户不存在'
             }), 404
         
-        # 调用工程师对话控制器
+        # 调用业务控制器处理对话逻辑（会话管理、消息持久化、AI 调用等）
         result = engineer_chat_controller.send_message(
             event_id=event_id,
             user_id=user.user_id,  # 使用用户的user_id
@@ -77,7 +91,7 @@ def send_message():
             if 'ai_processing' in result:
                 response_data['ai_processing'] = result['ai_processing']
             
-            # 兼容同步模式（如果有ai_response字段）
+            # 兼容同步模式（若控制器直接返回 ai_response）
             if 'ai_response' in result:
                 response_data['ai_response'] = result['ai_response']
                 
@@ -108,6 +122,7 @@ def send_message():
             'message': f'服务器内部错误: {str(e)}'
         }), 500
 
+# 获取历史接口：返回当前事件下该用户会话的消息历史与轮次信息
 @engineer_chat_bp.route('/history', methods=['GET'])
 @jwt_required()
 def get_chat_history():
@@ -170,6 +185,7 @@ def get_chat_history():
             'message': f'服务器内部错误: {str(e)}'
         }), 500
 
+# 新建会话接口：在轮次到达上限时可强制开启新会话
 @engineer_chat_bp.route('/new-session', methods=['POST'])
 @jwt_required()
 def create_new_session():
@@ -209,7 +225,7 @@ def create_new_session():
                 'message': '用户不存在'
             }), 404
         
-        # 强制创建新会话（通过传递一个新的唯一标识）
+        # 强制创建新会话（通过临时 user_id 变体确保生成新的 session_id）
         import uuid
         temp_user_id = f"{user.user_id}_{uuid.uuid4().hex[:8]}"
         new_session_id = engineer_chat_controller._get_or_create_session_id(event_id, temp_user_id)
@@ -229,6 +245,7 @@ def create_new_session():
             'message': f'服务器内部错误: {str(e)}'
         }), 500
 
+# 状态接口：返回当前会话可聊轮次、最新事件概要以及事件基础信息
 @engineer_chat_bp.route('/status', methods=['GET'])
 @jwt_required()
 def get_chat_status():
@@ -262,7 +279,7 @@ def get_chat_status():
                 'message': '用户不存在'
             }), 404
         
-        # 获取当前会话信息
+        # 获取当前会话信息（这里使用控制器内部方法读取会话和历史）
         session_id = engineer_chat_controller._get_or_create_session_id(event_id, user.user_id)
         chat_history = engineer_chat_controller._get_engineer_chat_history(session_id)
         

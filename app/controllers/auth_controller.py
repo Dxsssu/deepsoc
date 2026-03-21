@@ -1,3 +1,14 @@
+"""
+app.controllers.auth_controller
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+认证与账户管理控制器：
+1. 登录/登出与鉴权状态检查
+2. 当前用户信息读取
+3. 管理员初始化与管理员创建用户
+4. 当前用户修改密码
+"""
+
 from datetime import datetime, timezone, timedelta
 import logging
 from flask import Blueprint, request, jsonify, current_app, make_response
@@ -12,6 +23,7 @@ logger = logging.getLogger(__name__)
 # 创建蓝图
 auth_bp = Blueprint('auth', __name__)
 
+# 登录接口：校验用户名密码，签发 JWT，并返回用户基础信息
 @auth_bp.route('/login', methods=['POST'])
 def login():
     """用户登录"""
@@ -41,7 +53,7 @@ def login():
         
         logger.info(f"用户登录成功: {data['username']}")
         
-        # 生成访问令牌
+        # 生成访问令牌（identity 使用 username，后续接口通过 get_jwt_identity 获取）
         access_token = create_access_token(identity=data['username'])
         
         # 创建响应对象
@@ -59,7 +71,7 @@ def login():
             }
         }))
         
-        # 设置cookie
+        # 设置 cookie（当前配置允许前端 JS 读取 token，适用于现有前端实现）
         expires = datetime.now(timezone.utc) + timedelta(days=1)  # 24小时过期
         response.set_cookie(
             'access_token', 
@@ -76,6 +88,7 @@ def login():
         logger.error(f"登录过程发生错误: {str(e)}")
         return jsonify({'status': 'error', 'message': '登录过程发生错误'}), 500
 
+# 当前用户信息接口：依赖 JWT，从 identity 反查用户并返回资料
 @auth_bp.route('/me', methods=['GET'])
 @jwt_required()
 def get_current_user():
@@ -108,6 +121,7 @@ def get_current_user():
         logger.error(f"获取用户信息时发生错误: {str(e)}")
         return jsonify({'status': 'error', 'message': '获取用户信息时发生错误'}), 500
 
+# 认证状态检查接口：用于前端判断当前是否已登录
 @auth_bp.route('/check-auth', methods=['GET'])
 @jwt_required(optional=True)
 def check_auth():
@@ -126,6 +140,7 @@ def check_auth():
             'authenticated': False
         }), 200
 
+# 退出登录接口：JWT 无状态，服务端仅清理 cookie，真正“退出”由客户端丢弃 token 完成
 @auth_bp.route('/logout', methods=['POST'])
 @jwt_required(optional=True)
 def logout():
@@ -193,7 +208,7 @@ def init_admin():
         logger.error(f"管理员账户创建错误: {str(e)}")
         return jsonify({'status': 'error', 'message': f'创建过程发生错误: {str(e)}'}), 500
 
-# 创建普通用户账户（仅限管理员）
+# 管理员创建用户接口：要求当前登录用户角色为 admin
 @auth_bp.route('/create-user', methods=['POST'])
 @jwt_required()
 def create_user():
@@ -251,6 +266,7 @@ def create_user():
         logger.error(f"用户账户创建错误: {str(e)}")
         return jsonify({'status': 'error', 'message': '创建过程发生错误'}), 500
 
+# 修改密码接口：校验旧密码后写入新密码哈希
 @auth_bp.route('/change-password', methods=['POST'])
 @jwt_required()
 def change_password():
