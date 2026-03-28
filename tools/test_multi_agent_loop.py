@@ -24,6 +24,7 @@ Usage examples:
 from __future__ import annotations
 
 import argparse
+import json
 import signal
 import subprocess
 import sys
@@ -35,6 +36,11 @@ try:
     from dotenv import load_dotenv
 except Exception:
     load_dotenv = None
+
+try:
+    import yaml
+except Exception:
+    yaml = None
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -198,6 +204,75 @@ def print_snapshot(elapsed: int, snap: dict) -> None:
     )
 
 
+def _normalize_message_content(content: object) -> dict:
+    if isinstance(content, dict):
+        return content
+    if isinstance(content, str):
+        try:
+            parsed = json.loads(content)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            return {}
+    return {}
+
+
+def fetch_new_llm_yaml_messages(event_id: str, last_seen_id: int) -> tuple[list[dict], int]:
+    """Fetch newly created LLM-response-like messages and return payloads in dict form."""
+    from main import app
+    from app.models import Message
+
+    out: list[dict] = []
+    new_last_seen_id = last_seen_id
+
+    with app.app_context():
+        rows = (
+            Message.query.filter(Message.event_id == event_id, Message.id > last_seen_id)
+            .order_by(Message.id.asc())
+            .all()
+        )
+
+        for msg in rows:
+            if msg.id and msg.id > new_last_seen_id:
+                new_last_seen_id = msg.id
+
+            message_type = str(msg.message_type or "")
+            if not message_type.endswith("llm_response"):
+                continue
+
+            raw_content = _normalize_message_content(msg.message_content)
+            payload = raw_content.get("data", raw_content) if isinstance(raw_content, dict) else {}
+
+            if isinstance(payload, dict) and payload:
+                out.append(payload)
+            else:
+                out.append(
+                    {
+                        "type": "llm_response",
+                        "from": msg.message_from,
+                        "event_id": msg.event_id,
+                        "round_id": msg.round_id,
+                        "response_type": "UNKNOWN",
+                    }
+                )
+
+    return out, new_last_seen_id
+
+
+def print_yaml_payloads(payloads: list[dict]) -> None:
+    if not payloads:
+        return
+
+    print(">>> New Agent LLM Responses")
+    for payload in payloads:
+        if yaml:
+            text = yaml.safe_dump(payload, allow_unicode=True, sort_keys=False).strip()
+        else:
+            text = json.dumps(payload, ensure_ascii=False, indent=2)
+        print(text)
+        print()
+
+
 def is_basic_loop_done(snap: dict) -> bool:
     if not snap.get("exists"):
         return False
@@ -244,6 +319,7 @@ def main() -> int:
         started_at = time.time()
         basic_done = False
         full_done = False
+        last_seen_message_id = 0
 
         while not shutting_down:
             elapsed = int(time.time() - started_at)
@@ -252,6 +328,10 @@ def main() -> int:
 
             snap = fetch_snapshot(event_id)
             print_snapshot(elapsed, snap)
+            payloads, last_seen_message_id = fetch_new_llm_yaml_messages(
+                event_id, last_seen_message_id
+            )
+            print_yaml_payloads(payloads)
 
             basic_done = basic_done or is_basic_loop_done(snap)
             full_done = full_done or is_full_cycle_done(snap)
