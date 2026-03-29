@@ -6,6 +6,7 @@ from .socket_controller import register_socket_events, broadcast_message
 from .auth_controller import auth_bp
 from .prompt_controller import prompt_bp
 from .state_controller import state_bp
+from .kb_controller import kb_bp
 
 __all__ = [
     'event_bp',
@@ -14,4 +15,5 @@ __all__ = [
     'auth_bp',
     'prompt_bp',
     'state_bp',
+    'kb_bp',
 ]

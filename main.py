@@ -99,6 +99,9 @@ app.register_blueprint(user_bp, url_prefix='/api/user')
 from app.controllers.engineer_chat_api import engineer_chat_bp
 app.register_blueprint(engineer_chat_bp, url_prefix='/api/engineer-chat')
 
+from app.controllers.kb_controller import kb_bp
+app.register_blueprint(kb_bp, url_prefix='/api/kb')
+
 from app.controllers.socket_controller import register_socket_events
 register_socket_events(socketio)
 

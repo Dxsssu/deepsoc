@@ -6,6 +6,7 @@ from datetime import datetime
 from flask import current_app
 from app.models import db, Event, Task, Message, Summary
 from app.services.llm_service import call_llm, parse_yaml_response
+from app.services.knowledge_base_service import get_knowledge_base_service
 from app.controllers.socket_controller import broadcast_message
 from app.services.prompt_service import PromptService
 from app.utils.message_utils import create_standard_message
@@ -111,6 +112,32 @@ def process_event(event, publisher: RabbitMQPublisher):
 {last_round_summary_content}
 针对当前网络安全事件进行分析决策，并分配适当的任务给安全管理员_manager，如果有必要。
 """
+    if is_first_round:
+        try:
+            kb_service = get_knowledge_base_service()
+            kb_prompt_block, kb_bundle = kb_service.render_captain_first_round_prompt_block(
+                query_parts=[
+                    event.event_name,
+                    event.message,
+                    event.context,
+                    event.source,
+                    event.severity,
+                ],
+                top_k=6,
+            )
+            if kb_prompt_block:
+                user_prompt = f"{user_prompt}\n{kb_prompt_block}\n"
+            logger.info(
+                "Captain first-round KB retrieval summary: "
+                f"initial={len(kb_bundle['initial'].get('hits', []))}, "
+                f"cases={len(kb_bundle['cases'].get('hits', []))}, "
+                f"playbook={len(kb_bundle['playbook'].get('hits', []))}, "
+                f"cases_threshold={kb_bundle.get('cases_score_threshold')}, "
+                f"decision_source={kb_bundle.get('decision_source', '')}"
+            )
+        except Exception as kb_err:
+            logger.warning(f"Captain first-round KB retrieval failed: {kb_err}")
+
     logger.info(f"User prompt for event {event.event_id}, round {round_id}:\n{user_prompt}")
     logger.info("--------------------------------")
     

@@ -8,6 +8,7 @@ from app.models.models import (
     Message,
     Summary,
     Prompt,
+    KBDocument,
     GlobalSetting,
     User,
 )
@@ -22,6 +23,7 @@ __all__ = [
     'Message',
     'Summary',
     'Prompt',
+    'KBDocument',
     'GlobalSetting',
     'User',
 ]

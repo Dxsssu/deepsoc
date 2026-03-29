@@ -340,6 +340,48 @@ class Prompt(db.Model):
         }
 
 
+class KBDocument(db.Model):
+    """知识库文档表"""
+    __tablename__ = 'kb_documents'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    doc_id = db.Column(db.String(64), unique=True, nullable=False)
+    tenant_id = db.Column(db.String(64), default='default', nullable=False)
+    kb_type = db.Column(db.String(64), nullable=False)
+    title = db.Column(db.String(256), nullable=False)
+    content = db.Column(db.Text, nullable=False)
+    source = db.Column(db.String(256), default='')
+    tags = db.Column(db.JSON, default=list)
+    doc_meta = db.Column(db.JSON, default=dict)
+    status = db.Column(db.String(32), default='published')  # draft/published/deprecated
+    version = db.Column(db.Integer, default=1)
+    confidence = db.Column(db.Float, default=0.8)
+    created_by = db.Column(db.String(64))
+    updated_by = db.Column(db.String(64))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'doc_id': self.doc_id,
+            'tenant_id': self.tenant_id,
+            'kb_type': self.kb_type,
+            'title': self.title,
+            'content': self.content,
+            'source': self.source,
+            'tags': self.tags or [],
+            'metadata': self.doc_meta or {},
+            'status': self.status,
+            'version': self.version,
+            'confidence': self.confidence,
+            'created_by': self.created_by,
+            'updated_by': self.updated_by,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
 class GlobalSetting(db.Model):
     """全局设置表，用于存储系统级状态"""
     __tablename__ = 'global_settings'

@@ -8,6 +8,7 @@ DeepSOC (Deep Security Operations Center) 是一个基于AI的安全运营中心
 - **[Architecture.md](Architecture.md)** - 系统整体架构文档
 - **[State_Flow_Design.md](State_Flow_Design.md)** - 状态流转设计文档
 - **[Agents.md](Agents.md)** - 多代理系统设计文档
+- **[Knowledge_Base_Design.md](Knowledge_Base_Design.md)** - 知识库设计与实现文档（Qdrant、多Collection、Agent融合）
 
 ### 功能特性
 - **[Engineer_Chat_Architecture.md](Engineer_Chat_Architecture.md)** - 工程师聊天系统架构文档
@@ -30,6 +31,7 @@ DeepSOC (Deep Security Operations Center) 是一个基于AI的安全运营中心
 - [Architecture.md](Architecture.md) - 了解系统整体架构
 - [Agents.md](Agents.md) - 理解多代理系统设计
 - [State_Flow_Design.md](State_Flow_Design.md) - 掌握状态流转机制
+- [Knowledge_Base_Design.md](Knowledge_Base_Design.md) - 理解知识库设计与Agent融合
 
 ### 🔧 技术实现
 - [Engineer_Chat_Architecture.md](Engineer_Chat_Architecture.md) - 工程师聊天系统的技术实现
