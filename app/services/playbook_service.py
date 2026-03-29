@@ -1,7 +1,6 @@
 import logging
 import json
-from typing import Dict, Any, Optional
-from app.config import config
+from typing import Dict, Any
 from app.models import db, Command, Execution
 import uuid
 

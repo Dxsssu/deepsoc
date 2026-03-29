@@ -109,7 +109,7 @@ def process_event(event, publisher: RabbitMQPublisher):
 {yaml_data}
 ```
 {last_round_summary_content}
-针对当前网络安全事件进行分析决策，并分配适当的任务给安全管理员_manager（_analyst, _operator, _coordinator），如果有必要。
+针对当前网络安全事件进行分析决策，并分配适当的任务给安全管理员_manager，如果有必要。
 """
     logger.info(f"User prompt for event {event.event_id}, round {round_id}:\n{user_prompt}")
     logger.info("--------------------------------")

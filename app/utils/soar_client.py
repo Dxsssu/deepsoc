@@ -1,22 +1,22 @@
+import os
 import requests
 import time
 import logging
 from typing import Optional, Dict, Any
-from app.config import config
 
 logger = logging.getLogger(__name__)
 
 class SOARClient:
     def __init__(self):
-        self.base_url = config.SOAR_API_URL
+        self.base_url = os.getenv('SOAR_API_URL', 'https://api.example-soar.com')
         self.headers = {
-            'hg-token': config.SOAR_API_TOKEN,  # 修改为正确的token头
+            'hg-token': os.getenv('SOAR_API_TOKEN', 'your_soar_api_token'),  # 修改为正确的token头
             'Content-Type': 'application/json'
         }
-        self.timeout = config.SOAR_API_TIMEOUT
-        self.retry_count = config.SOAR_RETRY_COUNT
-        self.retry_delay = config.SOAR_RETRY_DELAY
-        self.verify_ssl = config.SOAR_VERIFY_SSL
+        self.timeout = int(os.getenv('SOAR_API_TIMEOUT', 30))
+        self.retry_count = int(os.getenv('SOAR_RETRY_COUNT', 3))
+        self.retry_delay = int(os.getenv('SOAR_RETRY_DELAY', 5))
+        self.verify_ssl = os.getenv('SOAR_VERIFY_SSL', 'True').lower() == 'true'
 
     def execute_playbook(self, playbook_id: int, params: Dict[str, Any]) -> Optional[str]:
         """

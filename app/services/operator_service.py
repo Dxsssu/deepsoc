@@ -164,17 +164,33 @@ def process_operator_response(response, actions, publisher: RabbitMQPublisher, e
                 if db_msg_cmd_err and publisher: publisher.publish_message(message_body=db_msg_cmd_err.to_dict(), routing_key=f"notifications.frontend.{event_id}._operator.error_command_creation")
                 continue
             
+            normalized_command_type = command_detail.get('command_type')
+            normalized_entity = command_detail.get('command_entity', {})
+            if not isinstance(normalized_entity, dict):
+                normalized_entity = {}
+
+            # 强制迁移策略：不再使用 playbook，统一改为 mcp/manual
+            if normalized_command_type == 'playbook':
+                logger.warning("Operator返回了playbook命令，系统将自动转换为mcp命令。")
+                normalized_command_type = 'mcp'
+                if not normalized_entity.get('tool'):
+                    playbook_name = normalized_entity.get('playbook_name')
+                    playbook_id = normalized_entity.get('playbook_id')
+                    normalized_entity['tool'] = playbook_name or str(playbook_id) if playbook_id else ''
+                if not normalized_entity.get('server'):
+                    normalized_entity['server'] = 'threat_intel_mcp'
+
             new_command_id = str(uuid.uuid4())
             command = Command(
                 command_id=new_command_id,
-                command_type=command_detail.get('command_type'),
+                command_type=normalized_command_type,
                 command_name=command_detail.get('command_name'),
                 command_assignee=command_detail.get('command_assignee', '_executor'), # Default to executor
                 action_id=action.action_id,
                 task_id=action.task_id, # Get task_id from action
                 round_id=action.round_id, # Get round_id from action
                 event_id=action.event_id, # Get event_id from action
-                command_entity=command_detail.get('command_entity', {}),
+                command_entity=normalized_entity,
                 command_params=command_detail.get('command_params', {}),
                 command_status='pending'
             )

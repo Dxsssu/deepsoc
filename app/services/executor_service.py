@@ -6,7 +6,7 @@ from flask import current_app
 from sqlalchemy import func
 from app.models import db, Event, Task, Action, Command, Execution, Message
 from app.controllers.socket_controller import broadcast_message
-from app.services.playbook_service import PlaybookService
+from app.services.mcp_tool_service import MCPToolService
 from app.utils.message_utils import create_standard_message
 import logging
 
@@ -38,9 +38,15 @@ def process_command(command):
     
     try:
         # 根据命令类型执行不同的处理逻辑
-        if command.command_type == 'playbook':
-            # 执行SOAR剧本
-            result = execute_playbook_command(command)
+        if command.command_type == 'mcp':
+            # 执行MCP工具
+            result = execute_mcp_command(command)
+        elif command.command_type == 'playbook':
+            # Playbook 通道已停用，统一迁移到 mcp/manual
+            result = {
+                "status": "failed",
+                "message": "playbook命令通道已停用，请改用mcp或manual命令类型"
+            }
         elif command.command_type == 'manual':
             # 人工命令，需要前端用户处理
             result = handle_manual_command(command)
@@ -93,8 +99,8 @@ def process_command(command):
             "message": error_msg
         })
 
-def execute_playbook_command(command):
-    """执行SOAR剧本命令
+def execute_mcp_command(command):
+    """执行MCP工具命令并写入执行记录
     
     Args:
         command: 命令对象
@@ -102,15 +108,91 @@ def execute_playbook_command(command):
     Returns:
         执行结果
     """
-    logger.info(f"执行SOAR剧本命令: {command.command_id}")
-    
-    # 创建PlaybookService实例
-    playbook_service = PlaybookService()
-    
-    # 执行剧本
-    result = playbook_service.execute_playbook(command)
-    
-    return result
+    logger.info(f"执行MCP工具命令: {command.command_id}")
+
+    command_entity = command.command_entity or {}
+    if not isinstance(command_entity, dict):
+        command_entity = {}
+
+    server = (
+        command_entity.get('server')
+        or command_entity.get('server_name')
+        or command_entity.get('mcp_server')
+        or 'threat_intel_mcp'
+    )
+    tool = (
+        command_entity.get('tool')
+        or command_entity.get('tool_name')
+        or command_entity.get('mcp_tool')
+    )
+
+    if not tool:
+        error_msg = "MCP命令缺少 tool 信息（command_entity.tool）"
+        logger.error(error_msg)
+        execution = Execution(
+            execution_id=str(uuid.uuid4()),
+            command_id=command.command_id,
+            action_id=command.action_id,
+            task_id=command.task_id,
+            event_id=command.event_id,
+            round_id=command.round_id,
+            execution_result=json.dumps({"error": error_msg}, ensure_ascii=False),
+            execution_summary=error_msg,
+            execution_status="failed"
+        )
+        db.session.add(execution)
+        db.session.commit()
+        return {"status": "failed", "message": error_msg}
+
+    mcp_service = MCPToolService()
+    invoke_result = mcp_service.execute_tool(
+        server_name=str(server),
+        tool_name=str(tool),
+        params=command.command_params if isinstance(command.command_params, dict) else {}
+    )
+
+    if invoke_result.get('status') == 'success':
+        result_data = invoke_result.get('data', {})
+        execution = Execution(
+            execution_id=str(uuid.uuid4()),
+            command_id=command.command_id,
+            action_id=command.action_id,
+            task_id=command.task_id,
+            event_id=command.event_id,
+            round_id=command.round_id,
+            execution_result=json.dumps(result_data, ensure_ascii=False),
+            execution_summary=f"MCP工具 {tool} 执行成功",
+            execution_status="completed"
+        )
+        db.session.add(execution)
+        db.session.commit()
+        return {
+            "status": "success",
+            "message": "MCP工具执行成功",
+            "data": {
+                "execution_id": execution.execution_id,
+                "tool": tool,
+                "server": server,
+                "result": result_data
+            }
+        }
+
+    error_msg = invoke_result.get('message', 'MCP工具执行失败')
+    failure_data = invoke_result.get('data', {})
+    execution = Execution(
+        execution_id=str(uuid.uuid4()),
+        command_id=command.command_id,
+        action_id=command.action_id,
+        task_id=command.task_id,
+        event_id=command.event_id,
+        round_id=command.round_id,
+        execution_result=json.dumps({"error": error_msg, "details": failure_data}, ensure_ascii=False),
+        execution_summary=f"MCP工具 {tool} 执行失败",
+        execution_status="failed"
+    )
+    db.session.add(execution)
+    db.session.commit()
+    return {"status": "failed", "message": error_msg}
 
 def handle_manual_command(command):
     """处理人工命令

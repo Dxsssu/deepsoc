@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Utility to build prompts for different roles."""
 from app.models.models import Prompt
+from app.utils.mcp_servers.registry import render_tool_catalog_yaml
 
 ROLE_NAMES = {
     '_captain': 'role_soc_captain',
@@ -25,10 +26,12 @@ def generate_prompt(role: str) -> str:
 
     background = Prompt.query.filter_by(name=BACKGROUND_SECURITY).first()
     playbooks = Prompt.query.filter_by(name=BACKGROUND_PLAYBOOKS).first()
+    dynamic_mcp_tools = render_tool_catalog_yaml()
 
     prompt = role_prompt.content
     prompt = prompt.replace('{background_info}', background.content if background else '')
     prompt = prompt.replace('{playbook_list}', playbooks.content if playbooks else '')
+    prompt = prompt.replace('{mcp_tools}', dynamic_mcp_tools)
     return prompt
 
 

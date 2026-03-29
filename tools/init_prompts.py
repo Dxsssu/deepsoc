@@ -5,12 +5,19 @@ Usage:
     python tools/init_prompts.py
 """
 import os
+import sys
+from pathlib import Path
 from dotenv import load_dotenv
 from flask import Flask
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+load_dotenv(ROOT_DIR / ".env", override=True)
+
 from app.models.models import db, Prompt
 from app.prompts.default_prompts import DEFAULT_PROMPTS
-
-load_dotenv(override=True)
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', 'mysql+pymysql://deepsoc_user:deepsoc_password@localhost:3306/deepsoc')

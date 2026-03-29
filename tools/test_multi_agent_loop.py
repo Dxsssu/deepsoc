@@ -146,7 +146,7 @@ def create_test_event(event_id: str) -> str:
             event_id=event_id,
             event_name="Terminal Multi-Agent Loop Test",
             message=(
-                "SIEM告警：外部IP 66.240.205.34 对邮件网关 192.168.22.251 "
+                "SIEM告警：外部IP 11.22.33.44 对邮件网关 192.168.22.251 "
                 "出现异常登录尝试，请研判并处置。"
             ),
             context="本事件由 tools/test_multi_agent_loop.py 创建，用于验证多Agent链路连通性。",
