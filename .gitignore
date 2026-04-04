@@ -1,5 +1,6 @@
 # 环境变量和虚拟环境
 .env
+.venv/
 venv/
 env/
 ENV/
