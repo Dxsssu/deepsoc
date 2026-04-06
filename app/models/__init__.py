@@ -10,6 +10,7 @@ from app.models.models import (
     Prompt,
     GlobalSetting,
     User,
+    TracebackTaskTree,
 )
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     'Prompt',
     'GlobalSetting',
     'User',
+    'TracebackTaskTree',
 ]

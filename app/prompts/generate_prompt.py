@@ -11,7 +11,6 @@ ROLE_NAMES = {
 }
 
 BACKGROUND_SECURITY = 'background_security'
-BACKGROUND_PLAYBOOKS = 'background_soar_playbooks'
 
 
 def generate_prompt(role: str) -> str:
@@ -25,12 +24,10 @@ def generate_prompt(role: str) -> str:
         return ''
 
     background = Prompt.query.filter_by(name=BACKGROUND_SECURITY).first()
-    playbooks = Prompt.query.filter_by(name=BACKGROUND_PLAYBOOKS).first()
     dynamic_mcp_tools = render_tool_catalog_yaml()
 
     prompt = role_prompt.content
     prompt = prompt.replace('{background_info}', background.content if background else '')
-    prompt = prompt.replace('{playbook_list}', playbooks.content if playbooks else '')
     prompt = prompt.replace('{mcp_tools}', dynamic_mcp_tools)
     return prompt
 

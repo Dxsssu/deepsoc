@@ -1,12 +1,18 @@
 import time
 import uuid
-import json
 import traceback
-from datetime import datetime
-from sqlalchemy import func
-from app.models import db, Event, Task, Action, Message
+from app.models import db, Event, Task, Action
 from app.services.llm_service import call_llm, parse_yaml_response
 from app.services.prompt_service import PromptService
+from app.services.ttt_service import (
+    TTT_STATUS_TODO,
+    TTT_STATUS_IN_PROGRESS,
+    get_latest_ttt_snapshot,
+    list_leaf_nodes_by_status,
+    save_ttt_snapshot,
+    select_next_todo_leaf,
+    set_node_status,
+)
 from app.utils.message_utils import create_standard_message
 from app.utils.mq_utils import RabbitMQPublisher
 import pika
@@ -29,6 +35,202 @@ def get_pending_tasks():
             grouped_tasks[key] = []
         grouped_tasks[key].append(task)
     return grouped_tasks
+
+
+def has_dispatched_task_for_round(event_id: str, round_id: int) -> bool:
+    """当前轮次是否已下发过任务（确保每轮最多从TTT抽取1个节点）"""
+    round_task_count = Task.query.filter(
+        Task.event_id == event_id,
+        Task.round_id == round_id
+    ).count()
+    return round_task_count > 0
+
+
+def select_ttt_node_by_llm(event: Event, round_id: int, todo_nodes: list, publisher: RabbitMQPublisher):
+    """让LLM在todo节点中选择一个最高优先级节点"""
+    if not todo_nodes:
+        return None
+
+    request_data = {
+        "type": "select_highest_priority_ttt_node",
+        "req_id": str(uuid.uuid4()),
+        "res_id": str(uuid.uuid4()),
+        "event_id": event.event_id,
+        "event_round": round_id,
+        "event_name": event.event_name,
+        "event_message": event.message,
+        "todo_nodes": [
+            {
+                "node_id": n.get("node_id"),
+                "title": n.get("title"),
+                "status": n.get("status"),
+                "task_type": n.get("task_type"),
+                "assignee": n.get("assignee"),
+                "path": n.get("path"),
+            }
+            for n in todo_nodes
+        ],
+    }
+    yaml_data = yaml.dump(request_data, allow_unicode=True, default_flow_style=False, indent=2)
+
+    selector_system_prompt = """你是SOC安全管理员。你的唯一任务是：从输入的todo节点中选出最该优先执行的1个节点。
+优先级判断必须基于：
+1) 节点本身对事件研判推进的价值；
+2) 是否能尽快产出关键证据。
+不要随意下任务，不要脱离节点内容。
+输出必须是YAML，格式如下：
+type: llm_response
+from: _manager
+event_id: '{ 来自输入 }'
+round_id: '{ 来自输入 }'
+response_type: NODE_SELECTION
+selected_node_id: '{ 必须来自todo_nodes.node_id }'
+selection_reason: '{ 简要说明为什么这个节点优先级最高 }'
+req_id: '{ 来自输入 }'
+res_id: '{ 来自输入 }'
+如果无法判断，则仍需选择一个最合理的node_id，不要输出多个节点。"""
+
+    selector_user_prompt = f"""```yaml
+{yaml_data}
+```
+请结合节点内容，从todo节点中选出优先级最高的一个节点，只能选一个。"""
+
+    llm_req_content = {
+        "text": f"安全经理正在请求大模型从TTT中选择最高优先级节点(Event: {event.event_id}, Round: {round_id})。"
+    }
+    db_message_llm_req = create_standard_message(
+        event_id=event.event_id,
+        message_from='system',
+        round_id=round_id,
+        message_type='manager_ttt_select_llm_request',
+        content_data=llm_req_content
+    )
+    if db_message_llm_req and publisher:
+        try:
+            routing_key = f"notifications.frontend.{db_message_llm_req.event_id}.{db_message_llm_req.message_from}.{db_message_llm_req.message_type}"
+            publisher.publish_message(message_body=db_message_llm_req.to_dict(), routing_key=routing_key)
+        except Exception as e_pub:
+            logger.error(f"发布TTT选择请求消息失败: {e_pub}")
+
+    response = call_llm(selector_system_prompt, selector_user_prompt)
+    parsed_response = parse_yaml_response(response)
+
+    db_message_llm_resp = create_standard_message(
+        event_id=event.event_id,
+        message_from='_manager',
+        round_id=round_id,
+        message_type='manager_ttt_select_llm_response',
+        content_data=parsed_response if isinstance(parsed_response, dict) else {"raw_response": response}
+    )
+    if db_message_llm_resp and publisher:
+        try:
+            routing_key = f"notifications.frontend.{db_message_llm_resp.event_id}.{db_message_llm_resp.message_from}.{db_message_llm_resp.message_type}"
+            publisher.publish_message(message_body=db_message_llm_resp.to_dict(), routing_key=routing_key)
+        except Exception as e_pub:
+            logger.error(f"发布TTT选择响应消息失败: {e_pub}")
+
+    if not isinstance(parsed_response, dict):
+        return None
+    selected_node_id = parsed_response.get("selected_node_id")
+    if not selected_node_id:
+        return None
+
+    return next((n for n in todo_nodes if str(n.get("node_id")) == str(selected_node_id)), None)
+
+
+def dispatch_one_ttt_todo(event: Event, publisher: RabbitMQPublisher) -> bool:
+    """从TTT中抽取一个todo叶子节点，转为Task并立即进入现有Manager处理链路"""
+    if not event:
+        return False
+
+    event_id = event.event_id
+    round_id = event.current_round
+
+    if has_dispatched_task_for_round(event_id, round_id):
+        return False
+
+    latest_ttt = get_latest_ttt_snapshot(event_id, with_for_update=True)
+    if not latest_ttt:
+        return False
+
+    todo_nodes = list_leaf_nodes_by_status(latest_ttt.tree_json or {}, TTT_STATUS_TODO)
+    if not todo_nodes:
+        return False
+
+    selected = select_ttt_node_by_llm(event, round_id, todo_nodes, publisher)
+    if not selected:
+        logger.warning(f"LLM未能选出TTT节点，回退本地优先级选择。event={event_id}")
+        selected = select_next_todo_leaf(latest_ttt.tree_json or {})
+    if not selected:
+        return False
+
+    updated_tree, updated = set_node_status(
+        latest_ttt.tree_json or {},
+        selected.get('node_id'),
+        TTT_STATUS_IN_PROGRESS,
+        extra_fields={
+            "claimed_by": "_manager",
+            "claimed_round_id": round_id
+        }
+    )
+    if not updated:
+        logger.warning(f"TTT节点状态更新失败，event={event_id}, node_id={selected.get('node_id')}")
+        db.session.rollback()
+        return False
+
+    ttt_snapshot = save_ttt_snapshot(
+        event_id=event_id,
+        tree_json=updated_tree,
+        updated_by='_manager',
+        auto_commit=False
+    )
+
+    task_id = str(uuid.uuid4())
+    task_type = selected.get('task_type') or 'query'
+    task_name = selected.get('title') or f"TTT节点任务-{selected.get('node_id', '')}"
+    task = Task(
+        task_id=task_id,
+        event_id=event_id,
+        task_name=task_name,
+        task_type=task_type,
+        task_assignee='_manager',
+        task_status='pending',
+        round_id=round_id,
+        result={
+            "ttt_node_id": selected.get('node_id'),
+            "ttt_path": selected.get('path'),
+            "ttt_version": ttt_snapshot.ttt_version,
+            "ttt_selected_by": "_manager"
+        }
+    )
+    db.session.add(task)
+    db.session.commit()
+
+    selected_content = {
+        "text": f"Manager从TTT中抽取了节点并创建Task: {task_name}",
+        "task_id": task.task_id,
+        "task_name": task.task_name,
+        "task_type": task.task_type,
+        "ttt_node_id": selected.get('node_id'),
+        "ttt_path": selected.get('path'),
+        "ttt_version": ttt_snapshot.ttt_version
+    }
+    db_message_selected = create_standard_message(
+        event_id=event_id,
+        message_from='_manager',
+        round_id=round_id,
+        message_type='ttt_task_selected',
+        content_data=selected_content
+    )
+    if db_message_selected and publisher:
+        try:
+            routing_key = f"notifications.frontend.{db_message_selected.event_id}.{db_message_selected.message_from}.{db_message_selected.message_type}"
+            publisher.publish_message(message_body=db_message_selected.to_dict(), routing_key=routing_key)
+        except Exception as e_pub:
+            logger.error(f"发布TTT节点抽取消息失败: {e_pub}")
+
+    process_task_group(event_id, round_id, [task], publisher)
+    return True
 
 def process_task_group(event_id, round_id, tasks, publisher: RabbitMQPublisher):
     """处理一组任务
@@ -74,6 +276,9 @@ def process_task_group(event_id, round_id, tasks, publisher: RabbitMQPublisher):
 ```
 
 分析来自`_captain`的任务要求，生成可供`_operator`操作的具体的`ACTION`。
+优先输出单条Action；仅当单条无法完成目标时，才输出多条Action。
+所有Action必须仅围绕当前task_id，不要扩展到其他节点或无关目标。
+不要指定具体MCP工具名称，只描述要完成的安全动作目标（例如：查询某IP威胁情报、查询某资产归属）。
 """
     logger.info(f"Manager User prompt for event {event_id}, round {round_id}:\n{user_prompt}")
     logger.info("--------------------------------")
@@ -238,20 +443,33 @@ def run_manager():
         with app.app_context():
             while True:
                 try:
-                    grouped_tasks = get_pending_tasks()
-                    if grouped_tasks:
-                        logger.info(f"Manager发现 {len(grouped_tasks)} 组待处理任务")
-                        for (event_id, round_id), tasks in grouped_tasks.items():
-                            process_task_group(event_id, round_id, tasks, publisher)
-                        # 任务处理完成后提交，以结束事务和释放锁
+                    did_work = False
+
+                    # 新流程：从TTT中抽取一个todo节点，转成任务后走既有动作分解链路
+                    processing_events = Event.query.filter_by(event_status='processing').order_by(Event.updated_at.asc()).all()
+                    for event in processing_events:
+                        if dispatch_one_ttt_todo(event, publisher):
+                            did_work = True
+
+                    # 兼容旧流程：如仍存在历史pending任务，一次只处理1条，避免并发下发多任务
+                    one_pending_task = Task.query.filter_by(task_status='pending').order_by(Task.created_at.asc()).first()
+                    if one_pending_task:
+                        did_work = True
+                        logger.info("Manager兼容模式处理1条pending任务")
+                        process_task_group(
+                            one_pending_task.event_id,
+                            one_pending_task.round_id,
+                            [one_pending_task],
+                            publisher
+                        )
+
+                    if did_work:
                         try:
                             db.session.commit()
                         except Exception as loop_commit_err:
                             logger.error(f"Manager 主循环提交事务失败: {loop_commit_err}")
                             db.session.rollback()
                     else:
-                        # logger.debug("Manager: 没有待处理任务，等待中...")
-                        # 本轮无任务也回滚，避免长事务持有快照
                         db.session.rollback()
                         time.sleep(5)
                 except pika.exceptions.AMQPConnectionError as amqp_err:

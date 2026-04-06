@@ -355,3 +355,33 @@ class GlobalSetting(db.Model):
             'value': self.value,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }
+
+
+class TracebackTaskTree(db.Model):
+    """TTT快照表，按版本保存事件溯源任务树"""
+    __tablename__ = 'traceback_task_trees'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    event_id = db.Column(db.String(64), nullable=False, index=True)
+    ttt_version = db.Column(db.Integer, nullable=False, default=1)
+    ttt_schema_version = db.Column(db.String(32), nullable=False, default='1.0')
+    tree_json = db.Column(db.JSON, nullable=False, default=dict)
+    updated_by = db.Column(db.String(64), nullable=False, default='_captain')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        db.UniqueConstraint('event_id', 'ttt_version', name='uq_ttt_event_version'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'event_id': self.event_id,
+            'ttt_version': self.ttt_version,
+            'ttt_schema_version': self.ttt_schema_version,
+            'tree_json': self.tree_json,
+            'updated_by': self.updated_by,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }

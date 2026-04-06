@@ -6,14 +6,15 @@ This script can:
 2) create one test event directly in DB (without frontend)
 3) poll pipeline progress and print stage status
 
-Basic success criteria (multi-agent loop reached executor):
+Basic success criteria (single-round smoke reached executor):
 - Task created
 - Action created
 - Command created
 - At least one command finished (completed/failed)
 
-Full-cycle success hint:
-- Summary generated
+Multi-round demo criteria (default):
+- At least one finished command appears in each round from 1..target_rounds
+- Default target_rounds is 2
 
 Usage examples:
   python tools/test_multi_agent_loop.py
@@ -58,7 +59,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--start-agents",
         action="store_true",
-        help="Start main service and all role processes before testing.",
+        default=True,
+        help="Start main service and all role processes before testing (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-start-agents",
+        action="store_false",
+        dest="start_agents",
+        help="Do not auto-start web/agent processes before testing.",
     )
     parser.add_argument(
         "--warmup-seconds",
@@ -69,14 +77,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--timeout",
         type=int,
-        default=180,
-        help="Max wait time for loop completion in seconds (default: 180).",
+        default=60,
+        help="Max wait time for loop completion in seconds (default: 60).",
     )
     parser.add_argument(
         "--poll-interval",
         type=int,
-        default=3,
-        help="Polling interval in seconds (default: 3).",
+        default=2,
+        help="Polling interval in seconds (default: 2).",
     )
     parser.add_argument(
         "--event-id",
@@ -88,6 +96,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--show-process-logs",
         action="store_true",
         help="Show stdout/stderr from spawned processes (default: hidden).",
+    )
+    parser.add_argument(
+        "--target-rounds",
+        type=int,
+        default=2,
+        help="Target rounds for multi-round demo completion (default: 2).",
     )
     return parser
 
@@ -161,7 +175,7 @@ def create_test_event(event_id: str) -> str:
 
 def fetch_snapshot(event_id: str) -> dict:
     from main import app
-    from app.models import Action, Command, Event, Execution, Summary, Task
+    from app.models import Action, Command, Event, Execution, Summary, Task, TracebackTaskTree
 
     with app.app_context():
         event = Event.query.filter_by(event_id=event_id).first()
@@ -173,10 +187,14 @@ def fetch_snapshot(event_id: str) -> dict:
         commands = Command.query.filter_by(event_id=event_id).all()
         executions = Execution.query.filter_by(event_id=event_id).all()
         summaries = Summary.query.filter_by(event_id=event_id).all()
+        ttt_snapshots = TracebackTaskTree.query.filter_by(event_id=event_id).all()
 
         command_statuses: dict[str, int] = {}
+        finished_command_rounds_set = set()
         for c in commands:
             command_statuses[c.command_status] = command_statuses.get(c.command_status, 0) + 1
+            if c.command_status in {"completed", "failed"} and c.round_id is not None:
+                finished_command_rounds_set.add(int(c.round_id))
 
         return {
             "exists": True,
@@ -187,7 +205,9 @@ def fetch_snapshot(event_id: str) -> dict:
             "command_count": len(commands),
             "execution_count": len(executions),
             "summary_count": len(summaries),
+            "ttt_version_count": len(ttt_snapshots),
             "command_statuses": command_statuses,
+            "finished_command_rounds": sorted(finished_command_rounds_set),
         }
 
 
@@ -200,7 +220,9 @@ def print_snapshot(elapsed: int, snap: dict) -> None:
         f"[{elapsed:>4}s] status={snap['event_status']}, round={snap['current_round']}, "
         f"tasks={snap['task_count']}, actions={snap['action_count']}, "
         f"commands={snap['command_count']}, executions={snap['execution_count']}, "
-        f"summaries={snap['summary_count']}, command_statuses={snap['command_statuses']}"
+        f"summaries={snap['summary_count']}, ttt_versions={snap.get('ttt_version_count', 0)}, "
+        f"command_statuses={snap['command_statuses']}, "
+        f"finished_command_rounds={snap.get('finished_command_rounds', [])}"
     )
 
 
@@ -288,8 +310,11 @@ def is_basic_loop_done(snap: dict) -> bool:
     )
 
 
-def is_full_cycle_done(snap: dict) -> bool:
-    return snap.get("summary_count", 0) > 0
+def is_multi_round_done(snap: dict, target_rounds: int) -> bool:
+    if target_rounds <= 1:
+        return is_basic_loop_done(snap)
+    rounds = set(snap.get("finished_command_rounds", []))
+    return all(r in rounds for r in range(1, target_rounds + 1))
 
 
 def main() -> int:
@@ -318,7 +343,7 @@ def main() -> int:
 
         started_at = time.time()
         basic_done = False
-        full_done = False
+        multi_round_done = False
         last_seen_message_id = 0
 
         while not shutting_down:
@@ -334,24 +359,23 @@ def main() -> int:
             print_yaml_payloads(payloads)
 
             basic_done = basic_done or is_basic_loop_done(snap)
-            full_done = full_done or is_full_cycle_done(snap)
+            multi_round_done = multi_round_done or is_multi_round_done(snap, args.target_rounds)
 
-            if basic_done:
+            if multi_round_done:
                 break
 
             time.sleep(args.poll_interval)
 
         print("\n=== Result ===")
-        if basic_done:
-            print("PASS: basic multi-agent loop completed (reached executor stage).")
-            if full_done:
-                print("PASS+: summary generated (expert stage observed).")
-            else:
-                print("INFO: summary not observed yet (may need more time or external integrations).")
+        if multi_round_done:
+            print(f"PASS: multi-round demo completed (target_rounds={args.target_rounds}).")
+            print(f"INFO: basic_loop_done={basic_done}, finished_command_rounds={snap.get('finished_command_rounds', [])}")
             print(f"event_id={event_id}")
             return 0
 
-        print("FAIL: timeout before basic loop completion.")
+        print(f"FAIL: timeout before reaching target_rounds={args.target_rounds}.")
+        if basic_done:
+            print("INFO: single-round basic loop had completed, but multi-round target not reached.")
         print(f"event_id={event_id}")
         return 1
 

@@ -15,7 +15,6 @@ ROLE_NAMES = {
 
 BACKGROUND_NAMES = {
     'background_security': 'background_security',
-    'background_soar_playbooks': 'background_soar_playbooks',
     'mcp_tools': 'mcp_tools'
 }
 

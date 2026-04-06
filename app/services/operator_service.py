@@ -169,16 +169,43 @@ def process_operator_response(response, actions, publisher: RabbitMQPublisher, e
             if not isinstance(normalized_entity, dict):
                 normalized_entity = {}
 
-            # 强制迁移策略：不再使用 playbook，统一改为 mcp/manual
-            if normalized_command_type == 'playbook':
-                logger.warning("Operator返回了playbook命令，系统将自动转换为mcp命令。")
+            normalized_params = command_detail.get('command_params', {})
+            if not isinstance(normalized_params, dict):
+                normalized_params = {}
+
+            # 统一仅使用mcp：manual/未知类型都转为mcp失败回退模式，并通知Expert
+            if normalized_command_type != 'mcp':
+                logger.warning(f"Operator返回了非mcp命令类型({normalized_command_type})，系统将自动转换为mcp失败回退模式。")
                 normalized_command_type = 'mcp'
-                if not normalized_entity.get('tool'):
-                    playbook_name = normalized_entity.get('playbook_name')
-                    playbook_id = normalized_entity.get('playbook_id')
-                    normalized_entity['tool'] = playbook_name or str(playbook_id) if playbook_id else ''
-                if not normalized_entity.get('server'):
-                    normalized_entity['server'] = 'threat_intel_mcp'
+                normalized_entity.setdefault('server', 'threat_intel_mcp')
+                normalized_entity.setdefault('tool', '')
+                normalized_params.setdefault('fallback_reason', 'no_suitable_mcp_tool')
+                normalized_params.setdefault('fallback_note', 'operator_output_non_mcp_command_type')
+
+            if not normalized_entity.get('tool'):
+                normalized_params.setdefault('fallback_reason', 'no_suitable_mcp_tool')
+                fallback_content = {
+                    "text": "Operator未匹配到合适MCP工具，已按mcp失败回退模式反馈Expert。",
+                    "event_id": event_id,
+                    "round_id": round_id,
+                    "task_id": action.task_id,
+                    "action_id": action.action_id,
+                    "reason": normalized_params.get('fallback_reason'),
+                    "action_name": action.action_name
+                }
+                db_msg_fallback = create_standard_message(
+                    event_id=event_id,
+                    message_from='_operator',
+                    round_id=round_id,
+                    message_type='operator_tool_fallback_to_expert',
+                    content_data=fallback_content
+                )
+                if db_msg_fallback and publisher:
+                    try:
+                        routing_key = f"notifications.frontend.{db_msg_fallback.event_id}.{db_msg_fallback.message_from}.{db_msg_fallback.message_type}"
+                        publisher.publish_message(message_body=db_msg_fallback.to_dict(), routing_key=routing_key)
+                    except Exception as e_pub_fallback:
+                        logger.error(f"发布Operator fallback消息失败: {e_pub_fallback}")
 
             new_command_id = str(uuid.uuid4())
             command = Command(
@@ -191,7 +218,7 @@ def process_operator_response(response, actions, publisher: RabbitMQPublisher, e
                 round_id=action.round_id, # Get round_id from action
                 event_id=action.event_id, # Get event_id from action
                 command_entity=normalized_entity,
-                command_params=command_detail.get('command_params', {}),
+                command_params=normalized_params,
                 command_status='pending'
             )
             db.session.add(command)

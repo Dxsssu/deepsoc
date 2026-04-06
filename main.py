@@ -30,7 +30,7 @@ def print_version_info():
     version_info['python_version'] = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     
     print("=" * 60)
-    print(f"🚀 DeepSOC - AI-Powered Security Operations Center")
+    print("DeepSOC - AI-Powered Security Operations Center")
     print("=" * 60)
     print(f"版本: {version_info['version']}")
     print(f"发布名称: {version_info['release_name']}")
@@ -254,11 +254,6 @@ def prompt_settings():
 @login_required
 def background_security():
     return render_template('background_security.html')
-
-@app.route('/settings/soar-playbooks')
-@login_required
-def soar_playbooks():
-    return render_template('soar_playbooks.html')
 
 @app.route('/settings/mcp-tools')
 @login_required

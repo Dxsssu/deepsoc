@@ -28,11 +28,11 @@ def get_executions_for_summarization():
     # 在新的状态流转逻辑中，completed状态表示执行已完成但尚未生成摘要
     # 生成摘要后状态会更新为summarized
     completed_executions = Execution.query.filter(
-        Execution.execution_status.in_(['completed'])
+        Execution.execution_status.in_(['completed', 'failed'])
     ).order_by(Execution.created_at.asc()).all()
     
     if completed_executions:
-        logger.info(f"找到 {len(completed_executions)} 个completed状态的执行结果需要生成摘要")
+        logger.info(f"找到 {len(completed_executions)} 个completed/failed状态的执行结果需要生成摘要")
     
     return completed_executions
 
@@ -335,6 +335,7 @@ def _check_and_update_task_status(task_id: str, publisher: RabbitMQPublisher):
             # should eventually pick up the event if it needs further state changes based on task completion.
             # _trigger_event_round_evaluation(task.event_id, task.round_id, publisher)
             db.session.commit() # Commit to release lock if acquired by with_for_update
+            _sync_ttt_node_status_by_task(task)
             return
         
         actions = Action.query.filter_by(task_id=task_id).all()
@@ -366,6 +367,7 @@ def _check_and_update_task_status(task_id: str, publisher: RabbitMQPublisher):
 
         db.session.commit()
         logger.info(f"Task {task_id} status updated to {task.task_status}.")
+        _sync_ttt_node_status_by_task(task)
 
         # Propagate to Event Round Evaluation
         if task.task_status in ['completed', 'failed']:
@@ -376,12 +378,28 @@ def _check_and_update_task_status(task_id: str, publisher: RabbitMQPublisher):
         logger.error(f"Error in _check_and_update_task_status for {task_id}: {e}")
         logger.error(traceback.format_exc())
 
+
+def _sync_ttt_node_status_by_task(task: Task):
+    """记录任务终态供Captain下一轮统一更新TTT，不在Expert侧直接改树"""
+    try:
+        if not task or task.task_status not in ['completed', 'failed']:
+            return
+        task_result = task.result if isinstance(task.result, dict) else {}
+        node_id = task_result.get('ttt_node_id', '')
+        logger.info(
+            f"Task终态已记录，等待Captain下一轮统一更新TTT: "
+            f"event={task.event_id}, task={task.task_id}, node={node_id}, status={task.task_status}"
+        )
+    except Exception as e:
+        logger.error(f"_sync_ttt_node_status_by_task failed for task={getattr(task, 'task_id', '')}: {e}")
+        logger.error(traceback.format_exc())
+
 def _trigger_event_round_evaluation(event_id: str, round_id: int, publisher: RabbitMQPublisher):
     """
     Called when a task's status is finalized. This function will invoke
     check_and_update_event_tasks_completion, which is now responsible for checking
     if all tasks (and their underlying executions) for the current event round are done,
-    and then updating the event status to 'tasks_completed' or 'failed'.
+    and then updating the event status to 'tasks_completed'.
     The event_lifecycle_manager_worker will then pick up 'tasks_completed' events.
     """
     if not event_id or round_id is None:
@@ -408,7 +426,7 @@ def check_and_update_event_tasks_completion(event_id, round_id, publisher: Rabbi
     """
     Checks if all tasks for a given event and round are completed or failed,
     AND all their underlying executions are also finalized (summarized, summarized_error, or failed).
-    If so, updates the event status to 'tasks_completed' or 'failed' (if any task/execution failed).
+    If so, updates the event status to 'tasks_completed'.
     This function is called by _trigger_event_round_evaluation.
     Uses pessimistic locking for event update.
 
@@ -471,14 +489,12 @@ def check_and_update_event_tasks_completion(event_id, round_id, publisher: Rabbi
     # The more critical check was done at each level of the chain.
 
     original_event_status = event.event_status
-    new_event_status = ''
-
+    new_event_status = 'tasks_completed'
     if any_task_failed:
-        new_event_status = 'failed' # If any task in the round failed, the event round (or event itself) might be considered failed.
-                                   # The `event_lifecycle_manager_worker` should handle this 'failed' state appropriately.
-    else:
-        # All tasks completed successfully
-        new_event_status = 'tasks_completed'
+        logger.info(
+            f"check_and_update_event_tasks_completion: Event {event_id} R{round_id} has failed tasks; "
+            "event仍将进入tasks_completed，由Captain在下一轮基于Expert总结更新TTT节点状态。"
+        )
 
     changed = False
     if event.event_status != new_event_status:

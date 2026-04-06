@@ -41,15 +41,6 @@ def process_command(command):
         if command.command_type == 'mcp':
             # 执行MCP工具
             result = execute_mcp_command(command)
-        elif command.command_type == 'playbook':
-            # Playbook 通道已停用，统一迁移到 mcp/manual
-            result = {
-                "status": "failed",
-                "message": "playbook命令通道已停用，请改用mcp或manual命令类型"
-            }
-        elif command.command_type == 'manual':
-            # 人工命令，需要前端用户处理
-            result = handle_manual_command(command)
         else:
             # 未知命令类型
             error_msg = f"未知命令类型: {command.command_type}"
@@ -125,9 +116,19 @@ def execute_mcp_command(command):
         or command_entity.get('tool_name')
         or command_entity.get('mcp_tool')
     )
+    command_params = command.command_params if isinstance(command.command_params, dict) else {}
+    fallback_reason = command_params.get('fallback_reason')
 
     if not tool:
-        error_msg = "MCP命令缺少 tool 信息（command_entity.tool）"
+        if fallback_reason == 'no_suitable_mcp_tool':
+            error_msg = "no_suitable_mcp_tool"
+            error_payload = {
+                "error": error_msg,
+                "message": "未匹配到合适MCP工具，已标记失败并等待Expert分析",
+            }
+        else:
+            error_msg = "MCP命令缺少 tool 信息（command_entity.tool）"
+            error_payload = {"error": error_msg}
         logger.error(error_msg)
         execution = Execution(
             execution_id=str(uuid.uuid4()),
@@ -136,7 +137,7 @@ def execute_mcp_command(command):
             task_id=command.task_id,
             event_id=command.event_id,
             round_id=command.round_id,
-            execution_result=json.dumps({"error": error_msg}, ensure_ascii=False),
+            execution_result=json.dumps(error_payload, ensure_ascii=False),
             execution_summary=error_msg,
             execution_status="failed"
         )
@@ -148,7 +149,7 @@ def execute_mcp_command(command):
     invoke_result = mcp_service.execute_tool(
         server_name=str(server),
         tool_name=str(tool),
-        params=command.command_params if isinstance(command.command_params, dict) else {}
+        params=command_params
     )
 
     if invoke_result.get('status') == 'success':
@@ -193,43 +194,6 @@ def execute_mcp_command(command):
     db.session.add(execution)
     db.session.commit()
     return {"status": "failed", "message": error_msg}
-
-def handle_manual_command(command):
-    """处理人工命令
-    
-    Args:
-        command: 命令对象
-    
-    Returns:
-        处理结果
-    """
-    logger.info(f"处理人工命令: {command.command_id}")
-    
-    # 人工命令需要前端用户处理，这里只是标记为等待处理
-    # 实际的处理逻辑会在前端用户完成后通过API更新
-    
-    # 创建执行记录
-    execution = Execution(
-        execution_id=str(uuid.uuid4()),
-        command_id=command.command_id,
-        action_id=command.action_id,
-        task_id=command.task_id,
-        event_id=command.event_id,
-        round_id=command.round_id,
-        execution_summary="等待人工处理",
-        execution_status="waiting"
-    )
-    db.session.add(execution)
-    db.session.commit()
-    
-    return {
-        "status": "success",
-        "message": "命令已提交，等待人工处理",
-        "data": {
-            "execution_id": execution.execution_id,
-            "status": "waiting"
-        }
-    }
 
 def update_action_status(action_id, status):
     """更新动作状态
