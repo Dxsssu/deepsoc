@@ -7,12 +7,53 @@ from sqlalchemy import func
 from app.models import db, Event, Task, Action, Command, Message
 from app.services.llm_service import call_llm, parse_yaml_response
 from app.services.prompt_service import PromptService
+from app.services.mcp_tool_service import MCPToolService
 from app.utils.message_utils import create_standard_message
 from app.utils.mq_utils import RabbitMQPublisher
 import pika
 import yaml
 import logging
 logger = logging.getLogger(__name__)
+
+
+def _build_mcp_catalog_index():
+    """构建MCP工具索引：用于校验LLM返回的server/tool是否真实存在"""
+    valid_pairs = set()
+    tool_to_servers = {}
+    try:
+        catalog = MCPToolService().get_tool_catalog()
+        servers = catalog.get("mcp_servers", []) if isinstance(catalog, dict) else []
+        for server in servers:
+            server_name = str(server.get("name", "")).strip()
+            if not server_name:
+                continue
+            for tool in server.get("tools", []) or []:
+                tool_name = str(tool.get("name", "")).strip()
+                if not tool_name:
+                    continue
+                valid_pairs.add((server_name, tool_name))
+                tool_to_servers.setdefault(tool_name, set()).add(server_name)
+    except Exception as e:
+        logger.error(f"加载MCP工具目录失败，将跳过目录校验: {e}")
+    return valid_pairs, tool_to_servers
+
+
+def _is_obvious_semantic_mismatch(action_name: str, tool_name: str) -> bool:
+    """识别明显语义错配：日志/认证类动作却使用情报信誉类工具"""
+    action_text = (action_name or "").lower()
+    tool_text = (tool_name or "").lower()
+    if not action_text or not tool_text:
+        return False
+
+    log_keywords = ["日志", "log", "payload", "认证", "登录", "审计"]
+    intel_keywords = ["reputation", "threat", "intel", "geoip", "whois"]
+
+    return any(k in action_text for k in log_keywords) and any(k in tool_text for k in intel_keywords)
+
+
+def _build_fallback_message(prefix: str, detail: str = "") -> str:
+    text = (detail or "").strip()
+    return f"{prefix}: {text}" if text else prefix
 
 def get_pending_actions():
     """获取待处理的动作，按照event_id和round_id分组
@@ -152,6 +193,7 @@ def process_operator_response(response, actions, publisher: RabbitMQPublisher, e
     """处理操作员响应，创建命令，并发送相关通知"""
     response_type = response.get('response_type')
     if response_type == 'COMMAND':
+        valid_mcp_pairs, tool_to_servers = _build_mcp_catalog_index()
         commands_data = response.get('commands', [])
         created_command_ids = []
         for command_detail in commands_data:
@@ -165,6 +207,8 @@ def process_operator_response(response, actions, publisher: RabbitMQPublisher, e
                 continue
             
             normalized_command_type = command_detail.get('command_type')
+            normalized_command_name = command_detail.get('command_name') or ''
+            fallback_message = str(command_detail.get('fallback_message') or '').strip()
             normalized_entity = command_detail.get('command_entity', {})
             if not isinstance(normalized_entity, dict):
                 normalized_entity = {}
@@ -173,24 +217,82 @@ def process_operator_response(response, actions, publisher: RabbitMQPublisher, e
             if not isinstance(normalized_params, dict):
                 normalized_params = {}
 
+            def mark_fallback(message_text: str):
+                nonlocal normalized_command_type, normalized_command_name
+                nonlocal normalized_entity, normalized_params, fallback_message
+                normalized_command_type = 'mcp'
+                normalized_command_name = 'fallback'
+                normalized_entity = {}
+                normalized_params = {}
+                if not fallback_message:
+                    fallback_message = message_text
+
+            if str(normalized_command_name).strip().lower() == 'fallback':
+                mark_fallback(_build_fallback_message(
+                    "no_suitable_mcp_tool",
+                    fallback_message or "operator_declared_fallback"
+                ))
+
             # 统一仅使用mcp：manual/未知类型都转为mcp失败回退模式，并通知Expert
             if normalized_command_type != 'mcp':
                 logger.warning(f"Operator返回了非mcp命令类型({normalized_command_type})，系统将自动转换为mcp失败回退模式。")
-                normalized_command_type = 'mcp'
-                normalized_entity.setdefault('server', 'threat_intel_mcp')
-                normalized_entity.setdefault('tool', '')
-                normalized_params.setdefault('fallback_reason', 'no_suitable_mcp_tool')
-                normalized_params.setdefault('fallback_note', 'operator_output_non_mcp_command_type')
+                mark_fallback(_build_fallback_message(
+                    "no_suitable_mcp_tool",
+                    f"operator_output_non_mcp_command_type={normalized_command_type}"
+                ))
+
+            # MCP目录校验：LLM返回不存在的工具/服务时，转回退，不允许硬选
+            raw_server = str(normalized_entity.get('server', '')).strip()
+            raw_tool = str(normalized_entity.get('tool', '')).strip()
+            if raw_tool:
+                if raw_server:
+                    if valid_mcp_pairs and (raw_server, raw_tool) not in valid_mcp_pairs:
+                        logger.warning(f"Operator返回了无效MCP工具组合: server={raw_server}, tool={raw_tool}")
+                        mark_fallback(_build_fallback_message(
+                            "no_suitable_mcp_tool",
+                            f"tool_not_in_mcp_catalog_or_server_mismatch server={raw_server}, tool={raw_tool}"
+                        ))
+                else:
+                    candidate_servers = list(tool_to_servers.get(raw_tool, []))
+                    if len(candidate_servers) == 1:
+                        normalized_entity['server'] = candidate_servers[0]
+                    elif len(candidate_servers) == 0:
+                        logger.warning(f"Operator返回了未注册MCP工具: tool={raw_tool}")
+                        mark_fallback(_build_fallback_message(
+                            "no_suitable_mcp_tool",
+                            f"tool_not_in_mcp_catalog tool={raw_tool}"
+                        ))
+                    else:
+                        logger.warning(f"Operator返回工具缺少server且存在多服务同名工具: tool={raw_tool}")
+                        mark_fallback(_build_fallback_message(
+                            "no_suitable_mcp_tool",
+                            f"ambiguous_tool_server_mapping tool={raw_tool}, servers={candidate_servers}"
+                        ))
+
+            # 语义兜底：明显错配时直接回退，避免“为执行而执行”
+            resolved_tool = str(normalized_entity.get('tool', '')).strip()
+            if resolved_tool and _is_obvious_semantic_mismatch(action.action_name, resolved_tool):
+                logger.warning(
+                    f"Operator命令与动作语义明显不匹配，转fallback。action={action.action_name}, tool={resolved_tool}"
+                )
+                mark_fallback(_build_fallback_message(
+                    "no_suitable_mcp_tool",
+                    f"tool_semantic_mismatch_with_action action={action.action_name}, tool={resolved_tool}"
+                ))
 
             if not normalized_entity.get('tool'):
-                normalized_params.setdefault('fallback_reason', 'no_suitable_mcp_tool')
+                if not fallback_message:
+                    mark_fallback(_build_fallback_message(
+                        "no_suitable_mcp_tool",
+                        f"no_matching_tool_for_action action={action.action_name}"
+                    ))
                 fallback_content = {
                     "text": "Operator未匹配到合适MCP工具，已按mcp失败回退模式反馈Expert。",
                     "event_id": event_id,
                     "round_id": round_id,
                     "task_id": action.task_id,
                     "action_id": action.action_id,
-                    "reason": normalized_params.get('fallback_reason'),
+                    "fallback_message": fallback_message,
                     "action_name": action.action_name
                 }
                 db_msg_fallback = create_standard_message(
@@ -208,17 +310,19 @@ def process_operator_response(response, actions, publisher: RabbitMQPublisher, e
                         logger.error(f"发布Operator fallback消息失败: {e_pub_fallback}")
 
             new_command_id = str(uuid.uuid4())
+            is_fallback = (normalized_command_name == 'fallback')
             command = Command(
                 command_id=new_command_id,
                 command_type=normalized_command_type,
-                command_name=command_detail.get('command_name'),
+                command_name=normalized_command_name or command_detail.get('command_name') or '',
                 command_assignee=command_detail.get('command_assignee', '_executor'), # Default to executor
                 action_id=action.action_id,
                 task_id=action.task_id, # Get task_id from action
                 round_id=action.round_id, # Get round_id from action
                 event_id=action.event_id, # Get event_id from action
-                command_entity=normalized_entity,
-                command_params=normalized_params,
+                command_entity=normalized_entity if not is_fallback else {},
+                command_params=normalized_params if not is_fallback else {},
+                command_result={"fallback_message": fallback_message} if (is_fallback and fallback_message) else None,
                 command_status='pending'
             )
             db.session.add(command)

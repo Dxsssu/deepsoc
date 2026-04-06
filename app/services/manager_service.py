@@ -1,7 +1,7 @@
 import time
 import uuid
 import traceback
-from app.models import db, Event, Task, Action
+from app.models import db, Event, Task, Action, Summary
 from app.services.llm_service import call_llm, parse_yaml_response
 from app.services.prompt_service import PromptService
 from app.services.ttt_service import (
@@ -46,10 +46,38 @@ def has_dispatched_task_for_round(event_id: str, round_id: int) -> bool:
     return round_task_count > 0
 
 
+def _is_captain_ttt_ready_for_round(event_id: str, round_id: int) -> bool:
+    """确保当前轮次的TTT已由Captain更新，避免Manager抢跑"""
+    latest_ttt = get_latest_ttt_snapshot(event_id)
+    if not latest_ttt:
+        return False
+    if latest_ttt.updated_by != '_captain':
+        return False
+
+    tree_json = latest_ttt.tree_json if isinstance(latest_ttt.tree_json, dict) else {}
+    tree_round = tree_json.get("round_id")
+    try:
+        return int(tree_round) == int(round_id)
+    except Exception:
+        return False
+
+
 def select_ttt_node_by_llm(event: Event, round_id: int, todo_nodes: list, publisher: RabbitMQPublisher):
     """让LLM在todo节点中选择一个最高优先级节点"""
     if not todo_nodes:
         return None
+
+    latest_ttt_snapshot = get_latest_ttt_snapshot(event.event_id)
+    latest_ttt_tree = latest_ttt_snapshot.tree_json if latest_ttt_snapshot else {}
+
+    last_round_summary_text = ""
+    if round_id and round_id > 1:
+        last_round_summary = Summary.query.filter(
+            Summary.event_id == event.event_id,
+            Summary.round_id < round_id
+        ).order_by(Summary.round_id.desc(), Summary.created_at.desc()).first()
+        if last_round_summary and last_round_summary.event_summary:
+            last_round_summary_text = last_round_summary.event_summary
 
     request_data = {
         "type": "select_highest_priority_ttt_node",
@@ -59,6 +87,11 @@ def select_ttt_node_by_llm(event: Event, round_id: int, todo_nodes: list, publis
         "event_round": round_id,
         "event_name": event.event_name,
         "event_message": event.message,
+        "event_context": event.context if event.context else "无",
+        "event_source": event.source if event.source else "无",
+        "event_severity": event.severity if event.severity else "无",
+        "last_round_summary": last_round_summary_text if last_round_summary_text else "无",
+        "latest_ttt": latest_ttt_tree if latest_ttt_tree else {},
         "todo_nodes": [
             {
                 "node_id": n.get("node_id"),
@@ -73,27 +106,12 @@ def select_ttt_node_by_llm(event: Event, round_id: int, todo_nodes: list, publis
     }
     yaml_data = yaml.dump(request_data, allow_unicode=True, default_flow_style=False, indent=2)
 
-    selector_system_prompt = """你是SOC安全管理员。你的唯一任务是：从输入的todo节点中选出最该优先执行的1个节点。
-优先级判断必须基于：
-1) 节点本身对事件研判推进的价值；
-2) 是否能尽快产出关键证据。
-不要随意下任务，不要脱离节点内容。
-输出必须是YAML，格式如下：
-type: llm_response
-from: _manager
-event_id: '{ 来自输入 }'
-round_id: '{ 来自输入 }'
-response_type: NODE_SELECTION
-selected_node_id: '{ 必须来自todo_nodes.node_id }'
-selection_reason: '{ 简要说明为什么这个节点优先级最高 }'
-req_id: '{ 来自输入 }'
-res_id: '{ 来自输入 }'
-如果无法判断，则仍需选择一个最合理的node_id，不要输出多个节点。"""
-
     selector_user_prompt = f"""```yaml
 {yaml_data}
 ```
-请结合节点内容，从todo节点中选出优先级最高的一个节点，只能选一个。"""
+当前阶段：NODE_SELECTION
+请结合TTT、MCP工具能力、上一轮结果、背景知识，从todo节点中选出最高优先级的一个节点，只能选一个。
+必须输出 response_type: NODE_SELECTION。"""
 
     llm_req_content = {
         "text": f"安全经理正在请求大模型从TTT中选择最高优先级节点(Event: {event.event_id}, Round: {round_id})。"
@@ -112,7 +130,9 @@ res_id: '{ 来自输入 }'
         except Exception as e_pub:
             logger.error(f"发布TTT选择请求消息失败: {e_pub}")
 
-    response = call_llm(selector_system_prompt, selector_user_prompt)
+    prompt_service = PromptService('_manager')
+    system_prompt = prompt_service.get_system_prompt()
+    response = call_llm(system_prompt, selector_user_prompt)
     parsed_response = parse_yaml_response(response)
 
     db_message_llm_resp = create_standard_message(
@@ -131,6 +151,9 @@ res_id: '{ 来自输入 }'
 
     if not isinstance(parsed_response, dict):
         return None
+    if parsed_response.get("response_type") != "NODE_SELECTION":
+        logger.warning(f"Manager 节点选择响应类型异常: {parsed_response.get('response_type')}")
+        return None
     selected_node_id = parsed_response.get("selected_node_id")
     if not selected_node_id:
         return None
@@ -147,6 +170,12 @@ def dispatch_one_ttt_todo(event: Event, publisher: RabbitMQPublisher) -> bool:
     round_id = event.current_round
 
     if has_dispatched_task_for_round(event_id, round_id):
+        return False
+
+    if not _is_captain_ttt_ready_for_round(event_id, round_id):
+        logger.debug(
+            f"跳过TTT分发：当前轮次TTT尚未由Captain就绪。event={event_id}, round={round_id}"
+        )
         return False
 
     latest_ttt = get_latest_ttt_snapshot(event_id, with_for_update=True)
@@ -253,10 +282,13 @@ def process_task_group(event_id, round_id, tasks, publisher: RabbitMQPublisher):
 
     tasks_data = []
     for task in tasks:
+        task_result = task.result if isinstance(task.result, dict) else {}
         tasks_data.append({
             'task_id': task.task_id,
             'task_name': task.task_name,
-            'task_type': task.task_type
+            'task_type': task.task_type,
+            'ttt_node_id': task_result.get('ttt_node_id', ''),
+            'ttt_path': task_result.get('ttt_path', '')
         })
 
     request_data = {
@@ -267,8 +299,25 @@ def process_task_group(event_id, round_id, tasks, publisher: RabbitMQPublisher):
         'event_round': round_id,
         'event_name': event.event_name,
         'event_message': event.message,
+        'event_context': event.context if event.context else '无',
+        'event_source': event.source if event.source else '无',
+        'event_severity': event.severity if event.severity else '无',
         'tasks': tasks_data
     }
+    latest_ttt_snapshot = get_latest_ttt_snapshot(event_id)
+    if latest_ttt_snapshot:
+        request_data['latest_ttt_version'] = latest_ttt_snapshot.ttt_version
+        request_data['latest_ttt'] = latest_ttt_snapshot.tree_json or {}
+    if round_id and round_id > 1:
+        last_round_summary = Summary.query.filter(
+            Summary.event_id == event_id,
+            Summary.round_id < round_id
+        ).order_by(Summary.round_id.desc(), Summary.created_at.desc()).first()
+        request_data['last_round_summary'] = (
+            last_round_summary.event_summary
+            if last_round_summary and last_round_summary.event_summary
+            else '无'
+        )
     yaml_data = yaml.dump(request_data, allow_unicode=True, default_flow_style=False, indent=2)
 
     user_prompt = f"""```yaml
@@ -276,8 +325,10 @@ def process_task_group(event_id, round_id, tasks, publisher: RabbitMQPublisher):
 ```
 
 分析来自`_captain`的任务要求，生成可供`_operator`操作的具体的`ACTION`。
+当前阶段：ACTION_PLANNING
 优先输出单条Action；仅当单条无法完成目标时，才输出多条Action。
 所有Action必须仅围绕当前task_id，不要扩展到其他节点或无关目标。
+Action内容必须与对应TTT节点语义强一致（目标对象、时间范围、日志类型要一致），禁止改题或泛化成不相关查询。
 不要指定具体MCP工具名称，只描述要完成的安全动作目标（例如：查询某IP威胁情报、查询某资产归属）。
 """
     logger.info(f"Manager User prompt for event {event_id}, round {round_id}:\n{user_prompt}")

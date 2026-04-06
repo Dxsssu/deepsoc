@@ -6,14 +6,13 @@ This script can:
 2) create one test event directly in DB (without frontend)
 3) poll pipeline progress and print stage status
 
-Basic success criteria (single-round smoke reached executor):
-- Task created
-- Action created
-- Command created
-- At least one command finished (completed/failed)
+Basic success criteria (single-round full loop):
+- Round 1 has finished command(s)
+- Round 1 has execution summary from expert
+- Round 1 has event summary (round summary) from expert
 
 Multi-round demo criteria (default):
-- At least one finished command appears in each round from 1..target_rounds
+- For every round in 1..target_rounds, all above conditions are met
 - Default target_rounds is 2
 
 Usage examples:
@@ -51,6 +50,12 @@ if str(ROOT_DIR) not in sys.path:
 if load_dotenv:
     load_dotenv(ROOT_DIR / ".env")
 
+PIPELINE_MESSAGE_TYPES = {
+    "command_result",                # _executor
+    "execution_summary_generated",   # _expert
+    "event_summary_generated",       # _expert
+}
+
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -77,8 +82,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--timeout",
         type=int,
-        default=60,
-        help="Max wait time for loop completion in seconds (default: 60).",
+        default=180,
+        help="Max wait time for loop completion in seconds (default: 180).",
     )
     parser.add_argument(
         "--poll-interval",
@@ -196,6 +201,18 @@ def fetch_snapshot(event_id: str) -> dict:
             if c.command_status in {"completed", "failed"} and c.round_id is not None:
                 finished_command_rounds_set.add(int(c.round_id))
 
+        execution_statuses: dict[str, int] = {}
+        summarized_execution_rounds_set = set()
+        for ex in executions:
+            execution_statuses[ex.execution_status] = execution_statuses.get(ex.execution_status, 0) + 1
+            if ex.execution_status in {"summarized", "summarized_error"} and ex.round_id is not None:
+                summarized_execution_rounds_set.add(int(ex.round_id))
+
+        summary_rounds_set = set()
+        for sm in summaries:
+            if sm.round_id is not None:
+                summary_rounds_set.add(int(sm.round_id))
+
         return {
             "exists": True,
             "event_status": event.event_status,
@@ -207,7 +224,10 @@ def fetch_snapshot(event_id: str) -> dict:
             "summary_count": len(summaries),
             "ttt_version_count": len(ttt_snapshots),
             "command_statuses": command_statuses,
+            "execution_statuses": execution_statuses,
             "finished_command_rounds": sorted(finished_command_rounds_set),
+            "summarized_execution_rounds": sorted(summarized_execution_rounds_set),
+            "summary_rounds": sorted(summary_rounds_set),
         }
 
 
@@ -222,7 +242,10 @@ def print_snapshot(elapsed: int, snap: dict) -> None:
         f"commands={snap['command_count']}, executions={snap['execution_count']}, "
         f"summaries={snap['summary_count']}, ttt_versions={snap.get('ttt_version_count', 0)}, "
         f"command_statuses={snap['command_statuses']}, "
-        f"finished_command_rounds={snap.get('finished_command_rounds', [])}"
+        f"execution_statuses={snap.get('execution_statuses', {})}, "
+        f"finished_command_rounds={snap.get('finished_command_rounds', [])}, "
+        f"summarized_execution_rounds={snap.get('summarized_execution_rounds', [])}, "
+        f"summary_rounds={snap.get('summary_rounds', [])}"
     )
 
 
@@ -239,8 +262,8 @@ def _normalize_message_content(content: object) -> dict:
     return {}
 
 
-def fetch_new_llm_yaml_messages(event_id: str, last_seen_id: int) -> tuple[list[dict], int]:
-    """Fetch newly created LLM-response-like messages and return payloads in dict form."""
+def fetch_new_pipeline_messages(event_id: str, last_seen_id: int) -> tuple[list[dict], int]:
+    """Fetch newly created pipeline messages, including executor/expert outputs."""
     from main import app
     from app.models import Message
 
@@ -259,66 +282,80 @@ def fetch_new_llm_yaml_messages(event_id: str, last_seen_id: int) -> tuple[list[
                 new_last_seen_id = msg.id
 
             message_type = str(msg.message_type or "")
-            if not message_type.endswith("llm_response"):
+            if not (message_type.endswith("llm_response") or message_type in PIPELINE_MESSAGE_TYPES):
                 continue
 
             raw_content = _normalize_message_content(msg.message_content)
             payload = raw_content.get("data", raw_content) if isinstance(raw_content, dict) else {}
+            if not isinstance(payload, dict):
+                payload = {}
 
-            if isinstance(payload, dict) and payload:
-                out.append(payload)
-            else:
-                out.append(
-                    {
-                        "type": "llm_response",
-                        "from": msg.message_from,
-                        "event_id": msg.event_id,
-                        "round_id": msg.round_id,
-                        "response_type": "UNKNOWN",
-                    }
-                )
+            out.append(
+                {
+                    "id": msg.id,
+                    "event_id": msg.event_id,
+                    "message_type": message_type,
+                    "from": msg.message_from,
+                    "round_id": msg.round_id,
+                    "payload": payload,
+                }
+            )
 
     return out, new_last_seen_id
 
 
-def print_yaml_payloads(payloads: list[dict]) -> None:
-    if not payloads:
+def print_pipeline_messages(messages: list[dict]) -> None:
+    if not messages:
         return
 
-    print(">>> New Agent LLM Responses")
-    for payload in payloads:
+    print(">>> New Pipeline Messages")
+    for item in messages:
+        envelope = {
+            "message_type": item.get("message_type"),
+            "from": item.get("from"),
+            "round_id": item.get("round_id"),
+            "payload": item.get("payload", {}),
+        }
         if yaml:
-            text = yaml.safe_dump(payload, allow_unicode=True, sort_keys=False).strip()
+            text = yaml.safe_dump(envelope, allow_unicode=True, sort_keys=False).strip()
         else:
-            text = json.dumps(payload, ensure_ascii=False, indent=2)
+            text = json.dumps(envelope, ensure_ascii=False, indent=2)
         print(text)
         print()
+
+
+def get_fully_completed_rounds(snap: dict) -> set[int]:
+    cmd_rounds = set(snap.get("finished_command_rounds", []))
+    exec_rounds = set(snap.get("summarized_execution_rounds", []))
+    summary_rounds = set(snap.get("summary_rounds", []))
+    return cmd_rounds & exec_rounds & summary_rounds
 
 
 def is_basic_loop_done(snap: dict) -> bool:
     if not snap.get("exists"):
         return False
-
-    command_statuses = snap.get("command_statuses", {})
-    finished_commands = command_statuses.get("completed", 0) + command_statuses.get("failed", 0)
-
-    return (
-        snap.get("task_count", 0) > 0
-        and snap.get("action_count", 0) > 0
-        and snap.get("command_count", 0) > 0
-        and finished_commands > 0
-    )
+    return 1 in get_fully_completed_rounds(snap)
 
 
 def is_multi_round_done(snap: dict, target_rounds: int) -> bool:
     if target_rounds <= 1:
         return is_basic_loop_done(snap)
-    rounds = set(snap.get("finished_command_rounds", []))
+    rounds = get_fully_completed_rounds(snap)
     return all(r in rounds for r in range(1, target_rounds + 1))
 
 
 def main() -> int:
     args = build_arg_parser().parse_args()
+
+    # 防止多轮演示被过短超时提前截断：
+    # 按轮次设置一个保底超时预算（每轮约90秒，至少120秒）
+    min_timeout = max(120, args.target_rounds * 90)
+    if args.timeout < min_timeout:
+        print(
+            f">>> timeout too small for target_rounds={args.target_rounds}, "
+            f"auto-adjust to {min_timeout}s (requested {args.timeout}s)"
+        )
+        args.timeout = min_timeout
 
     processes: list[subprocess.Popen] = []
     shutting_down = False
@@ -353,10 +390,10 @@ def main() -> int:
 
             snap = fetch_snapshot(event_id)
             print_snapshot(elapsed, snap)
-            payloads, last_seen_message_id = fetch_new_llm_yaml_messages(
+            messages, last_seen_message_id = fetch_new_pipeline_messages(
                 event_id, last_seen_message_id
             )
-            print_yaml_payloads(payloads)
+            print_pipeline_messages(messages)
 
             basic_done = basic_done or is_basic_loop_done(snap)
             multi_round_done = multi_round_done or is_multi_round_done(snap, args.target_rounds)
@@ -369,13 +406,25 @@ def main() -> int:
         print("\n=== Result ===")
         if multi_round_done:
             print(f"PASS: multi-round demo completed (target_rounds={args.target_rounds}).")
-            print(f"INFO: basic_loop_done={basic_done}, finished_command_rounds={snap.get('finished_command_rounds', [])}")
+            print(
+                "INFO: "
+                f"basic_loop_done={basic_done}, "
+                f"finished_command_rounds={snap.get('finished_command_rounds', [])}, "
+                f"summarized_execution_rounds={snap.get('summarized_execution_rounds', [])}, "
+                f"summary_rounds={snap.get('summary_rounds', [])}"
+            )
             print(f"event_id={event_id}")
             return 0
 
         print(f"FAIL: timeout before reaching target_rounds={args.target_rounds}.")
         if basic_done:
-            print("INFO: single-round basic loop had completed, but multi-round target not reached.")
+            print("INFO: single-round full loop had completed, but multi-round target not reached.")
+        print(
+            "INFO: "
+            f"finished_command_rounds={snap.get('finished_command_rounds', [])}, "
+            f"summarized_execution_rounds={snap.get('summarized_execution_rounds', [])}, "
+            f"summary_rounds={snap.get('summary_rounds', [])}"
+        )
         print(f"event_id={event_id}")
         return 1
 

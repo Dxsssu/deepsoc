@@ -169,6 +169,9 @@ class Command(db.Model):
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     def to_dict(self):
+        fallback_message = None
+        if isinstance(self.command_result, dict):
+            fallback_message = self.command_result.get('fallback_message')
         return {
             'id': self.id,
             'command_id': self.command_id,
@@ -180,6 +183,7 @@ class Command(db.Model):
             'command_type': self.command_type,
             'command_entity': self.command_entity,
             'command_params': self.command_params,
+            'fallback_message': fallback_message,
             'command_status': self.command_status,
             'command_result': self.command_result,
             'created_at': self.created_at.isoformat() if self.created_at else None,

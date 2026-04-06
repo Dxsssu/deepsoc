@@ -44,7 +44,7 @@ def process_execution_summary(execution: Execution, publisher: RabbitMQPublisher
         publisher: RabbitMQPublisher instance
     """
     logger.info(f"处理执行结果摘要: {execution.execution_id} (Event: {execution.event_id}, Command: {execution.command_id})")
-    original_status = execution.execution_status
+    original_status = getattr(execution, "_source_execution_status", execution.execution_status)
     
     try:
         # 获取执行结果
@@ -571,13 +571,29 @@ def execution_summary_worker(app, publisher: RabbitMQPublisher):
                 if pending_executions:
                     # logger.info(f"ExecutionSummaryWorker: 发现 {len(pending_executions)} 个待处理的执行结果") # Reduced verbosity from get_executions... itself
                     for execution in pending_executions:
-                        # Re-fetch execution inside the loop to ensure it's still 'completed'
+                        # 先抢占执行记录，防止并发/重复进程对同一execution重复生成摘要
+                        claimed = Execution.query.filter(
+                            Execution.execution_id == execution.execution_id,
+                            Execution.execution_status.in_(['completed', 'failed'])
+                        ).update(
+                            {"execution_status": "summarizing"},
+                            synchronize_session=False
+                        )
+                        db.session.commit()
+                        if not claimed:
+                            continue
+
+                        # Re-fetch execution inside the loop to ensure it's still eligible
                         # This helps avoid race conditions if another process/thread modifies it.
-                        fresh_execution = Execution.query.filter_by(execution_id=execution.execution_id, execution_status='completed').first()
+                        fresh_execution = Execution.query.filter_by(
+                            execution_id=execution.execution_id,
+                            execution_status='summarizing'
+                        ).first()
                         if fresh_execution:
+                            fresh_execution._source_execution_status = execution.execution_status
                             process_execution_summary(fresh_execution, publisher)
                         else:
-                            logger.info(f"ExecutionSummaryWorker: Execution {execution.execution_id} no longer 'completed' or not found. Skipping.")
+                            logger.info(f"ExecutionSummaryWorker: Execution {execution.execution_id} no longer eligible or not found. Skipping.")
                     time.sleep(1) # Shorter sleep if there was work
                 else:
                     # Use configured interval, default if not set

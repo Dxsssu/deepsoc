@@ -59,9 +59,10 @@ def process_command(command):
             update_action_status(command.action_id, 'completed')
         else:
             command.command_status = 'failed'
-            command.command_result = {
-                "error": result.get('message') if result else "未知错误"
-            }
+            fail_payload = {"error": result.get('message') if result else "未知错误"}
+            if isinstance(result, dict) and result.get('fallback_message'):
+                fail_payload["fallback_message"] = result.get('fallback_message')
+            command.command_result = fail_payload
             
             # 更新关联的动作状态
             update_action_status(command.action_id, 'failed')
@@ -105,6 +106,9 @@ def execute_mcp_command(command):
     if not isinstance(command_entity, dict):
         command_entity = {}
 
+    command_result = command.command_result if isinstance(command.command_result, dict) else {}
+    fallback_message = str(command_result.get("fallback_message") or "").strip()
+
     server = (
         command_entity.get('server')
         or command_entity.get('server_name')
@@ -117,18 +121,37 @@ def execute_mcp_command(command):
         or command_entity.get('mcp_tool')
     )
     command_params = command.command_params if isinstance(command.command_params, dict) else {}
-    fallback_reason = command_params.get('fallback_reason')
+
+    # fallback命令：operator未找到可用MCP工具时，直接失败并保留fallback_message
+    if (command.command_name or '').strip().lower() == 'fallback' or fallback_message:
+        effective_fallback = fallback_message or "no_suitable_mcp_tool"
+        error_payload = {
+            "error": "no_suitable_mcp_tool",
+            "fallback_message": effective_fallback,
+            "message": "Operator未匹配到合适MCP工具，已进入fallback链路",
+        }
+        execution = Execution(
+            execution_id=str(uuid.uuid4()),
+            command_id=command.command_id,
+            action_id=command.action_id,
+            task_id=command.task_id,
+            event_id=command.event_id,
+            round_id=command.round_id,
+            execution_result=json.dumps(error_payload, ensure_ascii=False),
+            execution_summary="fallback: no_suitable_mcp_tool",
+            execution_status="failed"
+        )
+        db.session.add(execution)
+        db.session.commit()
+        return {
+            "status": "failed",
+            "message": "no_suitable_mcp_tool",
+            "fallback_message": effective_fallback
+        }
 
     if not tool:
-        if fallback_reason == 'no_suitable_mcp_tool':
-            error_msg = "no_suitable_mcp_tool"
-            error_payload = {
-                "error": error_msg,
-                "message": "未匹配到合适MCP工具，已标记失败并等待Expert分析",
-            }
-        else:
-            error_msg = "MCP命令缺少 tool 信息（command_entity.tool）"
-            error_payload = {"error": error_msg}
+        error_msg = "MCP命令缺少 tool 信息（command_entity.tool）"
+        error_payload = {"error": error_msg}
         logger.error(error_msg)
         execution = Execution(
             execution_id=str(uuid.uuid4()),
@@ -222,6 +245,7 @@ def create_command_message(command, result):
         "action_id": command.action_id,
         "task_id": command.task_id,
         "status": command.command_status,
+        "fallback_message": command.command_result.get("fallback_message") if isinstance(command.command_result, dict) else None,
         "result": command.command_result
     }
     
