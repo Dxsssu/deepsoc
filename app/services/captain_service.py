@@ -2,6 +2,7 @@ import time
 import uuid
 import traceback
 from app.models import db, Event, Task, Summary
+from app.services.knowledge_base_service import KnowledgeBaseService
 from app.services.llm_service import call_llm, parse_yaml_response
 from app.services.prompt_service import PromptService
 from app.services.ttt_service import (
@@ -19,6 +20,38 @@ import pika
 
 import logging
 logger = logging.getLogger(__name__)
+
+
+def _build_sop_query_text(event: Event) -> str:
+    parts = []
+    if event.event_name:
+        parts.append(f"event_name: {event.event_name}")
+    if event.message:
+        parts.append(f"event_message: {event.message}")
+    if event.context:
+        parts.append(f"context: {event.context}")
+    if event.source:
+        parts.append(f"source: {event.source}")
+    if event.severity:
+        parts.append(f"severity: {event.severity}")
+    return "\n".join(parts).strip()
+
+
+def _retrieve_sop_guidance_for_event(event: Event, top_k: int = 1) -> dict:
+    """按事件语义检索SOP，供Captain初始化TTT时参考。"""
+    query_text = _build_sop_query_text(event) or "empty_event"
+    try:
+        kb_service = KnowledgeBaseService()
+        hits = kb_service.search_sop_for_event(
+            event_name=event.event_name or "",
+            event_message=query_text,
+            limit=max(top_k, 1),
+        )
+        return {"query_text": query_text, "hits": hits or []}
+    except Exception as e:
+        logger.error(f"事件 {event.event_id} 检索SOP失败: {e}")
+        logger.error(traceback.format_exc())
+        return {"query_text": query_text, "hits": [], "error": str(e)}
 
 
 def get_events_to_process():
@@ -63,6 +96,17 @@ def process_event(event, publisher: RabbitMQPublisher):
 
     latest_ttt_snapshot = get_latest_ttt_snapshot(event.event_id)
     latest_ttt_tree = latest_ttt_snapshot.tree_json if latest_ttt_snapshot else {}
+    is_ttt_initialization_round = not bool(latest_ttt_snapshot and latest_ttt_tree and latest_ttt_tree.get("root_nodes"))
+    sop_guidance = {}
+    if is_ttt_initialization_round:
+        sop_guidance = _retrieve_sop_guidance_for_event(event, top_k=1)
+        if sop_guidance.get("hits"):
+            top_payload = sop_guidance["hits"][0].get("payload", {}) if isinstance(sop_guidance["hits"], list) else {}
+            logger.info(
+                f"事件 {event.event_id} 初始化TTT前SOP检索命中: {top_payload.get('sop_name', 'unknown')}"
+            )
+        else:
+            logger.info(f"事件 {event.event_id} 初始化TTT前未命中SOP，Captain将自主规划。")
 
     request_data = {
         'type': 'plan_or_update_ttt_by_event',
@@ -79,6 +123,8 @@ def process_event(event, publisher: RabbitMQPublisher):
         'latest_ttt_version': latest_ttt_snapshot.ttt_version if latest_ttt_snapshot else 0,
         'latest_ttt': latest_ttt_tree if latest_ttt_tree else {}
     }
+    if is_ttt_initialization_round:
+        request_data['sop_guidance'] = sop_guidance
 
     tasks_history_list = []
     history_tasks_query = Task.query.filter_by(event_id=event.event_id).order_by(Task.created_at.desc()).all()
@@ -110,6 +156,16 @@ def process_event(event, publisher: RabbitMQPublisher):
 """
 
     yaml_data = yaml.dump(request_data, allow_unicode=True, default_flow_style=False, indent=2)
+    init_ttt_instruction = ""
+    if is_ttt_initialization_round:
+        init_ttt_instruction = """
+本轮是TTT初始化轮次：
+- 输入中的 sop_guidance 为语义检索到的SOP参考（如果命中）。
+- 初始化TTT时优先参考 sop_guidance.hits[0].payload.workflow_steps。
+- 将每个流程步骤映射为可执行的TTT节点（必要时拆分为父子节点）。
+- 若SOP与事件细节不完全一致，可做小幅调整，但不得偏离事件事实。
+"""
+
     round_analysis_instruction = ""
     if not is_first_round:
         round_analysis_instruction = """
@@ -123,6 +179,7 @@ def process_event(event, publisher: RabbitMQPublisher):
 {yaml_data}
 ```
 {last_round_summary_content}
+{init_ttt_instruction}
 {round_analysis_instruction}
 你是总规划师，请维护并输出完整TTT（Traceback Task Tree）快照，作为共享黑板给_manager使用。
 如果事件已经处置完成，请返回 response_type: MISSION_COMPLETE。

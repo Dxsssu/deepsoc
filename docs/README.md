@@ -13,6 +13,7 @@ DeepSOC (Deep Security Operations Center) 是一个基于AI的安全运营中心
 - **[Engineer_Chat_Architecture.md](Engineer_Chat_Architecture.md)** - 工程师聊天系统架构文档
 - **[Engineer_Chat_Feature.md](Engineer_Chat_Feature.md)** - 工程师聊天功能说明
 - **[User_Message_Display_Logic.md](User_Message_Display_Logic.md)** - 用户消息显示逻辑技术文档
+- **[SOP_Knowledge_Base_Design.md](SOP_Knowledge_Base_Design.md)** - SOP知识库（Qdrant）结构设计文档
 
 ### 配置指南
 - **[Development_Guide.md](Development_Guide.md)** - **开发团队必读**：版本管理和开发流程指南

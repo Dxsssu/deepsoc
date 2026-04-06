@@ -82,7 +82,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--timeout",
         type=int,
-        default=180,
+        default=600,
         help="Max wait time for loop completion in seconds (default: 180).",
     )
     parser.add_argument(
@@ -105,7 +105,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--target-rounds",
         type=int,
-        default=2,
+        default=6,
         help="Target rounds for multi-round demo completion (default: 2).",
     )
     return parser
