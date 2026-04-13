@@ -17,7 +17,18 @@
 TTT JSON 约定（v1）：
 - 顶层字段：`schema_version`, `event_id`, `round_id`, `root_nodes`
 - 节点字段（最小）：`node_id`, `title`, `status`, `children`
-- 叶子可选：`task_type`, `assignee`
+- 节点层级字段：`node_level`
+- 叶子字段（必填）：`task_type`, `assignee`
+
+TTT 采用严格三层结构：
+- L1（战略层 / Phase）：`node_level = L1_phase`
+- L2（战术层 / Sub-Goal）：`node_level = L2_sub_goal`
+- L3（执行层 / Atomic Intent）：`node_level = L3_atomic_intent`
+
+结构约束：
+- 只允许 `L1 -> L2 -> L3`
+- L3 必须是叶子节点（`children: []`）
+- L1/L2 不得承载可执行动作
 
 状态枚举（叶子节点）：
 - `todo`
@@ -32,6 +43,13 @@ TTT JSON 约定（v1）：
 4. Manager 每轮最多抽取 1 个 `todo` 叶子节点，先标记为 `in_progress`，再创建 1 条 Task。
 5. Task 继续走原有 Action/Command/Execution/Summary 链路。
 6. 下一轮 Captain 结合 summary 再更新 TTT。
+   - 后续轮次允许在必要时调整TTT结构与节点任务信息（不仅是状态更新）。
+   - 调整策略遵循“最小改动优先”，仅在出现新证据/新假设或原结构无法表达时再改结构。
+7. Reflector 校验：
+   - 初始化后：必须通过“三层结构校验”（L1->L2->L3）。
+   - 更新后：必须通过“三层结构校验”与“done节点冻结校验”。
+   - done节点冻结规则：已执行完成（status=done）的节点不得被删除、不得降级状态、不得修改标题/层级/任务信息。
+   - 更新校验失败时：更新轮次回退到上一版快照；初始化轮次校验失败则中止并标记事件错误。
 
 ## 4. 兼容策略
 - 若 Captain 仍返回旧协议 `TASK`，后端会自动转换为一层 TTT。

@@ -6,12 +6,12 @@ from app.services.knowledge_base_service import KnowledgeBaseService
 from app.services.llm_service import call_llm, parse_yaml_response
 from app.services.prompt_service import PromptService
 from app.services.ttt_service import (
-    apply_status_updates_from_candidate,
     build_ttt_from_task_list,
     get_latest_ttt_snapshot,
     has_open_work,
     normalize_ttt_tree,
     save_ttt_snapshot,
+    validate_ttt_with_reflector,
 )
 from app.utils.message_utils import create_standard_message
 from app.utils.mq_utils import RabbitMQPublisher
@@ -172,8 +172,25 @@ def process_event(event, publisher: RabbitMQPublisher):
 本轮是第2轮或之后的迭代：
 - response_text 需要重点分析上一轮执行结果与证据变化；
 - 明确说明哪些判断被验证、哪些存在不确定性；
-- 然后给出更新后的TTT快照并继续循环；
-- 只允许更新已有节点的status，不要新增/删除/重命名节点，不要调整层级结构。
+- 你需要读取最新TTT快照 + 上一轮summary + 历史任务信息，给出更新后的TTT快照并继续循环；
+- 允许在必要时调整树结构（新增/合并/拆分/重命名节点）以及更新节点任务信息；
+- 但必须遵循“最小改动优先”：能不改结构就不改，能小改就不大改；
+- 只有在发现新证据、新假设或旧结构已无法表达当前研判时，才进行结构调整。
+"""
+    strict_three_layer_instruction = """
+TTT结构必须严格为三层树，且只能是：
+- L1（战略层 / Phase）：单一核心目标，不得复合目标。
+- L2（战术层 / Sub-Goal）：为达成L1而需要验证的假设/子问题，不写具体动作。
+- L3（执行层 / Atomic Intent）：具体证据搜集意图或业务动作意图，必须可执行且明确。
+
+强制约束：
+- 仅允许 L1 -> L2 -> L3，禁止出现第4层及以上层级。
+- L3必须是叶子节点（children必须为空数组）。
+- L1/L2不得直接承载可执行动作。
+- 每个L3节点必须包含 task_type（query/write/notify）和 assignee（默认_operator）。
+- 若需要结构调整，请保持原有node_id尽量稳定，仅为新增节点分配新node_id。
+- 结构调整后仍需保证TTT可执行、可追踪、可最小化回滚。
+- 已经执行完成（status=done）的节点视为冻结节点，禁止修改其标题、层级、任务信息和状态。
 """
     user_prompt = f"""```yaml
 {yaml_data}
@@ -181,6 +198,7 @@ def process_event(event, publisher: RabbitMQPublisher):
 {last_round_summary_content}
 {init_ttt_instruction}
 {round_analysis_instruction}
+{strict_three_layer_instruction}
 你是总规划师，请维护并输出完整TTT（Traceback Task Tree）快照，作为共享黑板给_manager使用。
 如果事件已经处置完成，请返回 response_type: MISSION_COMPLETE。
 """
@@ -279,17 +297,60 @@ def process_event(event, publisher: RabbitMQPublisher):
 
     normalized_ttt = normalize_ttt_tree(ttt_tree, event_id=event.event_id, round_id=response_round_id)
 
-    # 结构锁：从已有TTT开始的后续轮次，只允许更新节点状态，不允许改结构
-    if latest_ttt_snapshot and isinstance(latest_ttt_tree, dict) and latest_ttt_tree.get("root_nodes"):
-        normalized_ttt = apply_status_updates_from_candidate(
-            base_tree_json=latest_ttt_tree,
-            candidate_tree_json=normalized_ttt,
+    reflector_mode = "init" if is_ttt_initialization_round else "update"
+    reflector_report = validate_ttt_with_reflector(
+        candidate_tree=normalized_ttt,
+        previous_tree=latest_ttt_tree if isinstance(latest_ttt_tree, dict) and latest_ttt_tree else None,
+        mode=reflector_mode,
+    )
+
+    for warning_item in reflector_report.get("warnings", []):
+        logger.warning(f"TTT Reflector warning (event={event.event_id}, round={response_round_id}): {warning_item}")
+
+    if not reflector_report.get("is_valid", False):
+        errors = reflector_report.get("errors", [])
+        logger.error(
+            f"TTT Reflector 校验失败 event={event.event_id}, round={response_round_id}, mode={reflector_mode}: {errors}"
+        )
+
+        reject_content = {
+            "text": "TTT Reflector 校验失败，本次候选树被拒绝。",
+            "mode": reflector_mode,
+            "errors": errors,
+            "warnings": reflector_report.get("warnings", []),
+            "stats": reflector_report.get("stats", {}),
+        }
+        db_message_reflect_reject = create_standard_message(
             event_id=event.event_id,
+            message_from="_captain",
             round_id=response_round_id,
+            message_type="ttt_reflector_rejected",
+            content_data=reject_content,
         )
-        logger.info(
-            f"事件 {event.event_id} R{response_round_id}: 已启用TTT结构锁，仅同步节点状态。"
-        )
+        if db_message_reflect_reject and publisher:
+            try:
+                routing_key = (
+                    f"notifications.frontend.{db_message_reflect_reject.event_id}."
+                    f"{db_message_reflect_reject.message_from}.{db_message_reflect_reject.message_type}"
+                )
+                publisher.publish_message(message_body=db_message_reflect_reject.to_dict(), routing_key=routing_key)
+            except Exception as e_pub:
+                logger.error(f"发布 TTT Reflector 拒绝消息失败: {e_pub}")
+
+        if reflector_mode == "update" and isinstance(latest_ttt_tree, dict) and latest_ttt_tree.get("root_nodes"):
+            normalized_ttt = normalize_ttt_tree(
+                latest_ttt_tree,
+                event_id=event.event_id,
+                round_id=response_round_id
+            )
+            logger.warning(
+                f"TTT Reflector 回退到上一版快照 event={event.event_id}, round={response_round_id}, "
+                f"source_version={latest_ttt_snapshot.ttt_version if latest_ttt_snapshot else 'N/A'}"
+            )
+        else:
+            event.event_status = 'error_processing'
+            db.session.commit()
+            return
 
     snapshot = save_ttt_snapshot(event.event_id, normalized_ttt, updated_by='_captain', auto_commit=False)
     db.session.commit()
