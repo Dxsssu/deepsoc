@@ -62,105 +62,6 @@ def _is_captain_ttt_ready_for_round(event_id: str, round_id: int) -> bool:
         return False
 
 
-def select_ttt_node_by_llm(event: Event, round_id: int, todo_nodes: list, publisher: RabbitMQPublisher):
-    """让LLM在todo节点中选择一个最高优先级节点"""
-    if not todo_nodes:
-        return None
-
-    latest_ttt_snapshot = get_latest_ttt_snapshot(event.event_id)
-    latest_ttt_tree = latest_ttt_snapshot.tree_json if latest_ttt_snapshot else {}
-
-    last_round_summary_text = ""
-    if round_id and round_id > 1:
-        last_round_summary = Summary.query.filter(
-            Summary.event_id == event.event_id,
-            Summary.round_id < round_id
-        ).order_by(Summary.round_id.desc(), Summary.created_at.desc()).first()
-        if last_round_summary and last_round_summary.event_summary:
-            last_round_summary_text = last_round_summary.event_summary
-
-    request_data = {
-        "type": "select_highest_priority_ttt_node",
-        "req_id": str(uuid.uuid4()),
-        "res_id": str(uuid.uuid4()),
-        "event_id": event.event_id,
-        "event_round": round_id,
-        "event_name": event.event_name,
-        "event_message": event.message,
-        "event_context": event.context if event.context else "无",
-        "event_source": event.source if event.source else "无",
-        "event_severity": event.severity if event.severity else "无",
-        "last_round_summary": last_round_summary_text if last_round_summary_text else "无",
-        "latest_ttt": latest_ttt_tree if latest_ttt_tree else {},
-        "todo_nodes": [
-            {
-                "node_id": n.get("node_id"),
-                "title": n.get("title"),
-                "status": n.get("status"),
-                "task_type": n.get("task_type"),
-                "assignee": n.get("assignee"),
-                "path": n.get("path"),
-            }
-            for n in todo_nodes
-        ],
-    }
-    yaml_data = yaml.dump(request_data, allow_unicode=True, default_flow_style=False, indent=2)
-
-    selector_user_prompt = f"""```yaml
-{yaml_data}
-```
-当前阶段：NODE_SELECTION
-请结合TTT、MCP工具能力、上一轮结果、背景知识，从todo节点中选出最高优先级的一个节点，只能选一个。
-必须输出 response_type: NODE_SELECTION。"""
-
-    llm_req_content = {
-        "text": f"安全经理正在请求大模型从TTT中选择最高优先级节点(Event: {event.event_id}, Round: {round_id})。"
-    }
-    db_message_llm_req = create_standard_message(
-        event_id=event.event_id,
-        message_from='system',
-        round_id=round_id,
-        message_type='manager_ttt_select_llm_request',
-        content_data=llm_req_content
-    )
-    if db_message_llm_req and publisher:
-        try:
-            routing_key = f"notifications.frontend.{db_message_llm_req.event_id}.{db_message_llm_req.message_from}.{db_message_llm_req.message_type}"
-            publisher.publish_message(message_body=db_message_llm_req.to_dict(), routing_key=routing_key)
-        except Exception as e_pub:
-            logger.error(f"发布TTT选择请求消息失败: {e_pub}")
-
-    prompt_service = PromptService('_manager')
-    system_prompt = prompt_service.get_system_prompt()
-    response = call_llm(system_prompt, selector_user_prompt)
-    parsed_response = parse_yaml_response(response)
-
-    db_message_llm_resp = create_standard_message(
-        event_id=event.event_id,
-        message_from='_manager',
-        round_id=round_id,
-        message_type='manager_ttt_select_llm_response',
-        content_data=parsed_response if isinstance(parsed_response, dict) else {"raw_response": response}
-    )
-    if db_message_llm_resp and publisher:
-        try:
-            routing_key = f"notifications.frontend.{db_message_llm_resp.event_id}.{db_message_llm_resp.message_from}.{db_message_llm_resp.message_type}"
-            publisher.publish_message(message_body=db_message_llm_resp.to_dict(), routing_key=routing_key)
-        except Exception as e_pub:
-            logger.error(f"发布TTT选择响应消息失败: {e_pub}")
-
-    if not isinstance(parsed_response, dict):
-        return None
-    if parsed_response.get("response_type") != "NODE_SELECTION":
-        logger.warning(f"Manager 节点选择响应类型异常: {parsed_response.get('response_type')}")
-        return None
-    selected_node_id = parsed_response.get("selected_node_id")
-    if not selected_node_id:
-        return None
-
-    return next((n for n in todo_nodes if str(n.get("node_id")) == str(selected_node_id)), None)
-
-
 def dispatch_one_ttt_todo(event: Event, publisher: RabbitMQPublisher) -> bool:
     """从TTT中抽取一个todo叶子节点，转为Task并立即进入现有Manager处理链路"""
     if not event:
@@ -186,10 +87,8 @@ def dispatch_one_ttt_todo(event: Event, publisher: RabbitMQPublisher) -> bool:
     if not todo_nodes:
         return False
 
-    selected = select_ttt_node_by_llm(event, round_id, todo_nodes, publisher)
-    if not selected:
-        logger.warning(f"LLM未能选出TTT节点，回退本地优先级选择。event={event_id}")
-        selected = select_next_todo_leaf(latest_ttt.tree_json or {})
+    # 线性执行模式：不再由LLM选择节点，按TTT待办叶子的稳定顺序依次推进
+    selected = select_next_todo_leaf(latest_ttt.tree_json or {})
     if not selected:
         return False
 

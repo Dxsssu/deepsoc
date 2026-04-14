@@ -1,0 +1,41 @@
+[
+  {
+    "id": "case-ssh-bruteforce-001",
+    "alert_type": "SSH暴力破解",
+    "severity": "high",
+    "alert_payload": "源IP 198.51.100.23 在 10 分钟内触发 430 次 SSH 登录失败，目标为公网运维网关。",
+    "actions": {
+      "ttt_snapshot": {
+        "version": 5,
+        "summary": "完成攻击源定性、边界排查、凭证审计与封禁处置"
+      }
+    },
+    "closed_at": "2026-03-15T18:30:00"
+  },
+  {
+    "id": "case-webshell-upload-002",
+    "alert_type": "WebShell上传",
+    "severity": "critical",
+    "alert_payload": "检测到可疑脚本文件落地并出现后续命令执行请求链路。",
+    "actions": {
+      "ttt_snapshot": {
+        "version": 7,
+        "summary": "确认上传入口、文件落地、命令执行和影响范围，完成隔离与加固"
+      }
+    },
+    "closed_at": "2026-02-08T09:45:00"
+  },
+  {
+    "id": "case-suspicious-outbound-003",
+    "alert_type": "可疑外联流量",
+    "severity": "medium",
+    "alert_payload": "内网主机连续访问疑似C2域名，伴随异常DNS隧道特征。",
+    "actions": {
+      "ttt_snapshot": {
+        "version": 4,
+        "summary": "定位受害主机进程并完成目标封禁、主机隔离和IOC扩散排查"
+      }
+    },
+    "closed_at": "2026-01-21T14:10:00"
+  }
+]

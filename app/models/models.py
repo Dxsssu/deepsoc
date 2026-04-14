@@ -361,6 +361,82 @@ class GlobalSetting(db.Model):
         }
 
 
+class Sop(db.Model):
+    """SOP标准处置流程（Markdown存储）"""
+    __tablename__ = 'sop'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    alert_type_key = db.Column(db.String(128), nullable=False, unique=True)
+    title = db.Column(db.String(256), nullable=False)
+    content_md = db.Column(db.Text, nullable=False, default='')
+    version = db.Column(db.String(32), nullable=False, default='1.0.0')
+    is_active = db.Column(db.Boolean, nullable=False, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'alert_type_key': self.alert_type_key,
+            'title': self.title,
+            'content_md': self.content_md,
+            'version': self.version,
+            'is_active': self.is_active,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class Asset(db.Model):
+    """资产信息（统一索引键）"""
+    __tablename__ = 'assets'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    asset_key = db.Column(db.String(256), nullable=False, unique=True)
+    asset_type = db.Column(db.String(64), nullable=True)
+    asset_group = db.Column(db.String(128), nullable=True)
+    criticality = db.Column(db.String(32), nullable=True)
+    owner = db.Column(db.String(128), nullable=True)
+    metadata_json = db.Column(db.JSON, nullable=False, default=dict)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'asset_key': self.asset_key,
+            'asset_type': self.asset_type,
+            'asset_group': self.asset_group,
+            'criticality': self.criticality,
+            'owner': self.owner,
+            'metadata_json': self.metadata_json,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class RuntimeAnnotation(db.Model):
+    """实时运营标注（简化内容模型）"""
+    __tablename__ = 'runtime_annotations'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    annotation_key = db.Column(db.String(256), nullable=False, index=True)
+    title = db.Column(db.String(256), nullable=False)
+    content_md = db.Column(db.Text, nullable=False, default='')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'annotation_key': self.annotation_key,
+            'title': self.title,
+            'content_md': self.content_md,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
 class TracebackTaskTree(db.Model):
     """TTT快照表，按版本保存事件溯源任务树"""
     __tablename__ = 'traceback_task_trees'

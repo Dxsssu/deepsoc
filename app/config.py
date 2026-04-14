@@ -22,6 +22,8 @@ config.QDRANT_TIMEOUT = int(os.getenv('QDRANT_TIMEOUT', 30))
 
 config.KB_COLLECTION = os.getenv('KB_COLLECTION', 'traceback_knowledge')
 config.SOP_KB_COLLECTION = os.getenv('SOP_KB_COLLECTION', 'sop_knowledge_base')
+config.KB_CASES_COLLECTION = os.getenv('KB_CASES_COLLECTION', 'kb_cases')
+config.KB_SECURITY_KNOWLEDGE_COLLECTION = os.getenv('KB_SECURITY_KNOWLEDGE_COLLECTION', 'kb_security_knowledge')
 config.KB_VECTOR_SIZE = int(os.getenv('KB_VECTOR_SIZE', 384))
 config.KB_DEFAULT_TOP_K = int(os.getenv('KB_DEFAULT_TOP_K', 3))
 config.KB_EMBEDDING_PROVIDER = os.getenv('KB_EMBEDDING_PROVIDER', 'hash')

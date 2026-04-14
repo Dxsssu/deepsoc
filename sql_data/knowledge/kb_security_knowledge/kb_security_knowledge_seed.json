@@ -1,0 +1,26 @@
+[
+  {
+    "id": "sk-attack-technique-001",
+    "title": "暴力破解攻击（Brute Force）",
+    "content": "暴力破解是指攻击者通过穷举用户名/密码组合尝试获取未授权访问权限，常见于SSH、RDP、VPN等认证入口。",
+    "knowledge_type": "attack_technique"
+  },
+  {
+    "id": "sk-cve-2026-10001",
+    "title": "CVE-2026-10001 漏洞简述",
+    "content": "该漏洞由输入边界校验不足导致，攻击者可构造特定请求触发远程代码执行风险。",
+    "knowledge_type": "cve"
+  },
+  {
+    "id": "sk-term-crypto-miner",
+    "title": "术语：挖矿木马（Crypto Miner）",
+    "content": "挖矿木马是利用受害主机算力进行加密货币挖矿的恶意程序，常表现为CPU/内存持续高占用与异常外联。",
+    "knowledge_type": "term"
+  },
+  {
+    "id": "sk-tool-mimikatz",
+    "title": "工具：Mimikatz",
+    "content": "Mimikatz 是常见的凭证提取工具，常被攻击者用于横向移动前的凭证收集阶段。",
+    "knowledge_type": "tool"
+  }
+]

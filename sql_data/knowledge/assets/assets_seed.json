@@ -1,0 +1,119 @@
+[
+  {
+    "asset_key": "10.10.20.15",
+    "asset_type": "ip",
+    "asset_group": "dmz-web",
+    "criticality": "high",
+    "owner": "web-sec-team",
+    "metadata_json": {
+      "hostname": "web-gateway-01",
+      "business": "internet-gateway",
+      "env": "production",
+      "tags": [
+        "dmz",
+        "gateway"
+      ]
+    }
+  },
+  {
+    "asset_key": "app-api-01.internal.local",
+    "asset_type": "hostname",
+    "asset_group": "core-api",
+    "criticality": "critical",
+    "owner": "api-platform",
+    "metadata_json": {
+      "ip": "10.20.30.40",
+      "business": "order-api",
+      "env": "production",
+      "tags": [
+        "internal",
+        "api"
+      ]
+    }
+  },
+  {
+    "asset_key": "portal.example.com",
+    "asset_type": "domain",
+    "asset_group": "external-portal",
+    "criticality": "medium",
+    "owner": "digital-ops",
+    "metadata_json": {
+      "cdn_enabled": true,
+      "waf_protected": true,
+      "tags": [
+        "public-facing"
+      ]
+    }
+  },
+  {
+    "asset_key": "db-main-01",
+    "asset_type": "hostname",
+    "asset_group": "core-db",
+    "criticality": "critical",
+    "owner": "dba-team",
+    "metadata_json": {
+      "ip": "10.20.88.10",
+      "business": "primary-transaction-db",
+      "engine": "mysql",
+      "tags": [
+        "database",
+        "sensitive"
+      ]
+    }
+  },
+  {
+    "asset_key": "172.16.8.9",
+    "asset_type": "ip",
+    "asset_group": "office-endpoint",
+    "criticality": "low",
+    "owner": "it-support",
+    "metadata_json": {
+      "hostname": "ops-laptop-09",
+      "department": "it",
+      "tags": [
+        "endpoint"
+      ]
+    }
+  },
+  {
+    "asset_key": "11.22.33.44",
+    "asset_type": "ip",
+    "asset_group": "external-source",
+    "criticality": "medium",
+    "owner": "soc-threat-intel",
+    "metadata_json": {
+      "role": "internet_source_ip",
+      "confidence": "untrusted",
+      "observation": "近期触发邮件网关异常登录尝试告警",
+      "tags": [
+        "external",
+        "suspicious-source",
+        "bruteforce-candidate"
+      ]
+    }
+  },
+  {
+    "asset_key": "192.168.22.251",
+    "asset_type": "ip",
+    "asset_group": "mail-gateway",
+    "criticality": "critical",
+    "owner": "mail-security-team",
+    "metadata_json": {
+      "hostname": "mail-gateway-01",
+      "business": "email_gateway",
+      "env": "production",
+      "zone": "intranet-edge",
+      "service_ports": [
+        25,
+        465,
+        587,
+        993
+      ],
+      "tags": [
+        "mail",
+        "gateway",
+        "key-asset"
+      ]
+    }
+  }
+]

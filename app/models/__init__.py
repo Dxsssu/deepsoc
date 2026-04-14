@@ -11,6 +11,9 @@ from app.models.models import (
     GlobalSetting,
     User,
     TracebackTaskTree,
+    Sop,
+    Asset,
+    RuntimeAnnotation,
 )
 
 __all__ = [
@@ -26,4 +29,7 @@ __all__ = [
     'GlobalSetting',
     'User',
     'TracebackTaskTree',
+    'Sop',
+    'Asset',
+    'RuntimeAnnotation',
 ]

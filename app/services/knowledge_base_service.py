@@ -1,4 +1,5 @@
 import hashlib
+import json
 import math
 import os
 import re
@@ -160,6 +161,46 @@ DEFAULT_SOP_SEED_DOCUMENTS: List[Dict[str, Any]] = [
     },
 ]
 
+DEFAULT_CASE_SEED_DOCUMENTS: List[Dict[str, Any]] = [
+    {
+        "id": "case-ssh-bruteforce-001",
+        "alert_type": "SSH暴力破解",
+        "severity": "high",
+        "alert_payload": "源IP在10分钟内触发大量SSH认证失败告警，目标资产为公网暴露运维网关。",
+        "actions": {
+            "summary": "完成源IP信誉研判、历史行为关联、边界封禁与凭证审计。",
+            "ttt_snapshot_ref": "TTT_v5",
+        },
+        "closed_at": "2026-03-15T18:30:00",
+    },
+    {
+        "id": "case-webshell-002",
+        "alert_type": "WebShell上传",
+        "severity": "critical",
+        "alert_payload": "检测到可疑脚本文件落地并伴随异常Web请求链路。",
+        "actions": {
+            "summary": "确认文件落地与命令执行链路，完成隔离、清理与入口加固。",
+            "ttt_snapshot_ref": "TTT_v7",
+        },
+        "closed_at": "2026-02-08T09:45:00",
+    },
+]
+
+DEFAULT_SECURITY_KNOWLEDGE_SEED_DOCUMENTS: List[Dict[str, Any]] = [
+    {
+        "id": "sk-attack-technique-bruteforce",
+        "title": "暴力破解攻击（Brute Force）",
+        "content": "暴力破解是攻击者通过高频尝试用户名/密码组合来获取未授权访问权限的攻击方式。",
+        "knowledge_type": "attack_technique",
+    },
+    {
+        "id": "sk-cve-2024-example",
+        "title": "CVE-2024-0001 示例漏洞说明",
+        "content": "该漏洞通常由输入校验不严导致，可能引发远程代码执行或信息泄露风险。",
+        "knowledge_type": "cve",
+    },
+]
+
 
 class KnowledgeBaseService:
     """基于Qdrant的可扩展溯源知识库服务。"""
@@ -175,9 +216,15 @@ class KnowledgeBaseService:
         self.embedding_base_url = os.getenv("EMBEDDING_BASE_URL") or os.getenv("LLM_BASE_URL")
         self.vector_size = int(os.getenv("KB_VECTOR_SIZE", 384))
         self.default_top_k = int(os.getenv("KB_DEFAULT_TOP_K", 3))
+        self.default_score_threshold = float(os.getenv("KB_SCORE_THRESHOLD", 0.9))
 
         self.default_collection = os.getenv("KB_COLLECTION", "traceback_knowledge")
         self.sop_collection = os.getenv("SOP_KB_COLLECTION", "sop_knowledge_base")
+        self.cases_collection = os.getenv("KB_CASES_COLLECTION", "kb_cases")
+        self.security_knowledge_collection = os.getenv(
+            "KB_SECURITY_KNOWLEDGE_COLLECTION",
+            "kb_security_knowledge",
+        )
 
         self.client = QdrantClient(
             url=self.qdrant_url,
@@ -244,6 +291,91 @@ class KnowledgeBaseService:
             collection_name=collection_name,
         )
 
+    def upsert_case_knowledge(
+        self,
+        documents: List[Dict[str, Any]],
+        collection_name: Optional[str] = None,
+        recreate_collection: bool = False,
+    ) -> Dict[str, Any]:
+        """写入历史案例知识（kb_cases）。"""
+        target_collection = collection_name or self.cases_collection
+        return self.upsert_knowledge(
+            knowledge_type="case",
+            documents=documents,
+            collection_name=target_collection,
+            recreate_collection=recreate_collection,
+        )
+
+    def search_case_knowledge(
+        self,
+        query_text: str,
+        alert_type: Optional[str] = None,
+        severity: Optional[str] = None,
+        limit: Optional[int] = None,
+        collection_name: Optional[str] = None,
+        score_threshold: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        """检索历史案例知识（kb_cases）。"""
+        target_collection = collection_name or self.cases_collection
+        payload_filters: Dict[str, Any] = {}
+        if alert_type:
+            payload_filters["alert_type"] = alert_type
+        if severity:
+            payload_filters["severity"] = severity
+
+        return self.search_knowledge(
+            query_text=query_text,
+            limit=limit,
+            collection_name=target_collection,
+            payload_filters=payload_filters or None,
+            score_threshold=(
+                float(score_threshold)
+                if score_threshold is not None
+                else self.default_score_threshold
+            ),
+        )
+
+    def upsert_security_knowledge(
+        self,
+        documents: List[Dict[str, Any]],
+        collection_name: Optional[str] = None,
+        recreate_collection: bool = False,
+    ) -> Dict[str, Any]:
+        """写入安全知识/术语（kb_security_knowledge）。"""
+        target_collection = collection_name or self.security_knowledge_collection
+        return self.upsert_knowledge(
+            knowledge_type="security_knowledge",
+            documents=documents,
+            collection_name=target_collection,
+            recreate_collection=recreate_collection,
+        )
+
+    def search_security_knowledge(
+        self,
+        query_text: str,
+        knowledge_type: Optional[str] = None,
+        limit: Optional[int] = None,
+        collection_name: Optional[str] = None,
+        score_threshold: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        """检索安全知识/术语（kb_security_knowledge）。"""
+        target_collection = collection_name or self.security_knowledge_collection
+        payload_filters: Dict[str, Any] = {}
+        if knowledge_type:
+            payload_filters["knowledge_type"] = knowledge_type
+
+        return self.search_knowledge(
+            query_text=query_text,
+            limit=limit,
+            collection_name=target_collection,
+            payload_filters=payload_filters or None,
+            score_threshold=(
+                float(score_threshold)
+                if score_threshold is not None
+                else self.default_score_threshold
+            ),
+        )
+
     def upsert_knowledge(
         self,
         knowledge_type: str,
@@ -251,7 +383,7 @@ class KnowledgeBaseService:
         collection_name: Optional[str] = None,
         recreate_collection: bool = False,
     ) -> Dict[str, Any]:
-        """写入通用知识文档，knowledge_type用于后续扩展（SOP/IOC/Case等）。"""
+        """写入通用知识文档（当前支持: sop/case/security_knowledge）。"""
         if not documents:
             return {"collection": collection_name or self.default_collection, "upserted": 0, "point_ids": []}
 
@@ -278,17 +410,31 @@ class KnowledgeBaseService:
         knowledge_type: Optional[str] = None,
         limit: Optional[int] = None,
         collection_name: Optional[str] = None,
+        payload_filters: Optional[Dict[str, Any]] = None,
+        score_threshold: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
         """按语义相似度 + payload过滤进行检索。"""
         target_collection = collection_name or self.default_collection
         top_k = limit or self.default_top_k
         query_vector = self._embed_text(query_text)
+        threshold = (
+            None
+            if score_threshold is None
+            else max(-1.0, min(1.0, float(score_threshold)))
+        )
 
         must_conditions = []
         if knowledge_type:
             must_conditions.append(
                 FieldCondition(key="knowledge_type", match=MatchValue(value=knowledge_type))
             )
+        if payload_filters:
+            for key, value in payload_filters.items():
+                if value is None:
+                    continue
+                must_conditions.append(
+                    FieldCondition(key=str(key), match=MatchValue(value=value))
+                )
 
         query_filter = Filter(must=must_conditions) if must_conditions else None
 
@@ -297,6 +443,7 @@ class KnowledgeBaseService:
                 collection_name=target_collection,
                 query_vector=query_vector,
                 query_filter=query_filter,
+                score_threshold=threshold,
                 with_payload=True,
                 with_vectors=False,
                 limit=top_k,
@@ -306,20 +453,26 @@ class KnowledgeBaseService:
                 collection_name=target_collection,
                 query=query_vector,
                 query_filter=query_filter,
+                score_threshold=threshold,
                 with_payload=True,
                 with_vectors=False,
                 limit=top_k,
             )
             results = getattr(query_response, "points", []) or []
 
-        return [
-            {
-                "id": str(hit.id),
-                "score": float(hit.score),
-                "payload": hit.payload or {},
-            }
-            for hit in results
-        ]
+        items: List[Dict[str, Any]] = []
+        for hit in results:
+            score = float(hit.score)
+            if threshold is not None and score < threshold:
+                continue
+            items.append(
+                {
+                    "id": str(hit.id),
+                    "score": score,
+                    "payload": hit.payload or {},
+                }
+            )
+        return items
 
     def list_collections(self) -> List[str]:
         """返回当前Qdrant中的collection列表。"""
@@ -346,6 +499,15 @@ class KnowledgeBaseService:
             raise ValueError("knowledge_type不能为空")
 
         doc = dict(raw_doc or {})
+        if kb_type == "sop":
+            return self._normalize_sop_document(doc)
+        if kb_type == "case":
+            return self._normalize_case_document(doc)
+        if kb_type in {"security_knowledge", "security"}:
+            return self._normalize_security_knowledge_document(doc)
+        raise ValueError(f"不支持的knowledge_type: {kb_type}")
+
+    def _normalize_sop_document(self, doc: Dict[str, Any]) -> Dict[str, Any]:
         sop_name = str(doc.get("sop_name", "")).strip()
         if not sop_name:
             raise ValueError("SOP知识文档必须包含sop_name")
@@ -355,12 +517,11 @@ class KnowledgeBaseService:
             raise ValueError("SOP知识文档必须包含sop_index")
 
         workflow_steps = self._as_workflow_steps(doc.get("workflow_steps"))
-
         if not workflow_steps:
             raise ValueError("SOP知识文档必须包含workflow_steps，且每步包含step_name和step_content")
 
-        payload = {
-            "knowledge_type": kb_type,
+        return {
+            "knowledge_type": "sop",
             "sop_name": sop_name,
             "sop_index": sop_index,
             "workflow_steps": workflow_steps,
@@ -369,27 +530,114 @@ class KnowledgeBaseService:
             "updated_at": str(doc.get("updated_at") or self._utc_now_text()),
         }
 
-        return payload
+    def _normalize_case_document(self, doc: Dict[str, Any]) -> Dict[str, Any]:
+        case_id = str(doc.get("id", "")).strip() or str(uuid.uuid4())
+        alert_type = str(doc.get("alert_type", "")).strip()
+        if not alert_type:
+            raise ValueError("案例知识文档必须包含 alert_type")
+
+        severity = str(doc.get("severity", "")).strip() or "unknown"
+        alert_payload = doc.get("alert_payload", "")
+        actions = doc.get("actions", "")
+        closed_at = str(doc.get("closed_at", "")).strip()
+
+        return {
+            "id": case_id,
+            "alert_type": alert_type,
+            "severity": severity,
+            "alert_payload": alert_payload,
+            "actions": actions,
+            "closed_at": closed_at,
+        }
+
+    def _normalize_security_knowledge_document(self, doc: Dict[str, Any]) -> Dict[str, Any]:
+        item_id = str(doc.get("id", "")).strip() or str(uuid.uuid4())
+        title = str(doc.get("title", "")).strip()
+        content = str(doc.get("content", "")).strip()
+        knowledge_type = str(doc.get("knowledge_type", "")).strip().lower()
+        valid_types = {"attack_technique", "cve", "term", "tool"}
+
+        if not title:
+            raise ValueError("安全知识文档必须包含 title")
+        if not content:
+            raise ValueError("安全知识文档必须包含 content")
+        if knowledge_type not in valid_types:
+            raise ValueError(
+                f"安全知识文档 knowledge_type 仅支持 {sorted(valid_types)}，收到: {knowledge_type}"
+            )
+
+        return {
+            "id": item_id,
+            "title": title,
+            "content": content,
+            "knowledge_type": knowledge_type,
+        }
 
     def _build_embedding_text(self, payload: Dict[str, Any]) -> str:
+        if "sop_name" in payload and "sop_index" in payload:
+            sections = [
+                payload.get("knowledge_type", ""),
+                payload.get("sop_name", ""),
+                payload.get("sop_index", ""),
+            ]
+            for step in payload.get("workflow_steps", []):
+                if not isinstance(step, dict):
+                    continue
+                sections.append(str(step.get("step_name", "")).strip())
+                sections.append(str(step.get("step_content", "")).strip())
+            return "\n".join([item for item in sections if item]).strip()
+
+        if "alert_type" in payload and "actions" in payload:
+            sections = [
+                str(payload.get("alert_type", "")).strip(),
+                str(payload.get("severity", "")).strip(),
+                self._serialize_embedding_fragment(payload.get("alert_payload")),
+                self._serialize_embedding_fragment(payload.get("actions")),
+                str(payload.get("closed_at", "")).strip(),
+            ]
+            return "\n".join([item for item in sections if item]).strip()
+
+        if "title" in payload and "content" in payload and "knowledge_type" in payload:
+            sections = [
+                str(payload.get("knowledge_type", "")).strip(),
+                str(payload.get("title", "")).strip(),
+                str(payload.get("content", "")).strip(),
+            ]
+            return "\n".join([item for item in sections if item]).strip()
+
         sections = [
-            payload.get("knowledge_type", ""),
-            payload.get("sop_name", ""),
-            payload.get("sop_index", ""),
+            str(payload.get("id", "")).strip(),
+            str(payload.get("title", "")).strip(),
+            self._serialize_embedding_fragment(payload),
         ]
-        for step in payload.get("workflow_steps", []):
-            if not isinstance(step, dict):
-                continue
-            sections.append(str(step.get("step_name", "")).strip())
-            sections.append(str(step.get("step_content", "")).strip())
         return "\n".join([item for item in sections if item]).strip()
 
-    def _build_point_id(self, payload: Dict[str, Any]) -> str:
+    def _build_point_id(self, payload: Dict[str, Any]) -> Any:
+        direct_id = str(payload.get("id", "")).strip()
+        if direct_id:
+            if direct_id.isdigit():
+                return int(direct_id)
+            try:
+                return str(uuid.UUID(direct_id))
+            except ValueError:
+                # 兼容业务自定义字符串ID：稳定映射到UUID，原始ID保留在payload.id
+                return str(uuid.uuid5(uuid.NAMESPACE_URL, f"qdrant-point:{direct_id}"))
+
         unique_key = (
             f"{payload.get('knowledge_type')}|"
             f"{payload.get('sop_name')}|{payload.get('version')}"
         )
         return str(uuid.uuid5(uuid.NAMESPACE_URL, unique_key))
+
+    @staticmethod
+    def _serialize_embedding_fragment(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False, sort_keys=True)
+        return str(value).strip()
 
     @staticmethod
     def _build_event_query_text(event_name: str, event_message: str) -> str:

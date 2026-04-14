@@ -1,8 +1,9 @@
 import time
+import os
+import sqlite3
 import uuid
 import traceback
 from app.models import db, Event, Task, Summary
-from app.services.knowledge_base_service import KnowledgeBaseService
 from app.services.llm_service import call_llm, parse_yaml_response
 from app.services.prompt_service import PromptService
 from app.services.ttt_service import (
@@ -37,21 +38,158 @@ def _build_sop_query_text(event: Event) -> str:
     return "\n".join(parts).strip()
 
 
-def _retrieve_sop_guidance_for_event(event: Event, top_k: int = 1) -> dict:
-    """按事件语义检索SOP，供Captain初始化TTT时参考。"""
-    query_text = _build_sop_query_text(event) or "empty_event"
+def _resolve_knowledge_sqlite_path() -> str:
+    env_path = os.getenv("KNOWLEDGE_SQLITE_DB_PATH", "").strip()
+    if env_path:
+        return env_path
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    return os.path.join(project_root, "knowledge_sqlite.db")
+
+
+def _load_sop_catalog_from_sqlite(limit: int = 100) -> list:
+    db_path = _resolve_knowledge_sqlite_path()
+    if not os.path.exists(db_path):
+        logger.warning(f"SOP SQLite库不存在: {db_path}")
+        return []
+
+    conn = None
     try:
-        kb_service = KnowledgeBaseService()
-        hits = kb_service.search_sop_for_event(
-            event_name=event.event_name or "",
-            event_message=query_text,
-            limit=max(top_k, 1),
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT alert_type_key, title, content_md, version
+            FROM sop
+            WHERE is_active = 1
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (max(int(limit), 1),),
         )
-        return {"query_text": query_text, "hits": hits or []}
+        rows = cursor.fetchall()
+        return [
+            {
+                "alert_type_key": str(row["alert_type_key"] or "").strip(),
+                "title": str(row["title"] or "").strip(),
+                "content_md": str(row["content_md"] or "").strip(),
+                "version": str(row["version"] or "").strip(),
+            }
+            for row in rows
+            if str(row["alert_type_key"] or "").strip()
+        ]
     except Exception as e:
-        logger.error(f"事件 {event.event_id} 检索SOP失败: {e}")
+        logger.error(f"加载SOP目录失败: {e}")
         logger.error(traceback.format_exc())
-        return {"query_text": query_text, "hits": [], "error": str(e)}
+        return []
+    finally:
+        if conn:
+            conn.close()
+
+
+def _retrieve_sop_guidance_for_event(event: Event, top_k: int = 1) -> dict:
+    """基于告警输入 + SOP列表，让LLM选出参考SOP流程。"""
+    query_text = _build_sop_query_text(event) or "empty_event"
+    sop_catalog = _load_sop_catalog_from_sqlite(limit=200)
+    if not sop_catalog:
+        return {"query_text": query_text, "sop_catalog_size": 0, "selected_sop": {}, "referenced_flow_md": ""}
+
+    event_payload = {
+        "event_name": event.event_name or "",
+        "event_message": event.message or "",
+        "context": event.context or "",
+        "source": event.source or "",
+        "severity": event.severity or "",
+        "query_text": query_text,
+    }
+    sop_catalog_payload = [
+        {
+            "alert_type_key": item.get("alert_type_key", ""),
+            "title": item.get("title", ""),
+            "content_md": item.get("content_md", ""),
+            "version": item.get("version", "1.0.0"),
+        }
+        for item in sop_catalog
+    ]
+    event_yaml = yaml.dump(event_payload, allow_unicode=True, default_flow_style=False, indent=2)
+    sop_catalog_yaml = yaml.dump(sop_catalog_payload, allow_unicode=True, default_flow_style=False, indent=2)
+    event_yaml = "\n".join([f"  {line}" if line.strip() else line for line in event_yaml.splitlines()])
+    sop_catalog_yaml = "\n".join([f"  {line}" if line.strip() else line for line in sop_catalog_yaml.splitlines()])
+
+    router_system_prompt = """
+你是SOP路由助手。给定一条安全告警和SOP列表，请选出最应参考的SOP，并输出“参考流程”文本。
+要求：
+- 仅基于输入内容判断，不要编造不存在的SOP。
+- 如果无法判断，选择最接近的一条并说明不确定性。
+- 只输出YAML，不要输出额外说明。
+"""
+    router_user_prompt = f"""```yaml
+event:
+{event_yaml}
+sop_catalog:
+{sop_catalog_yaml}
+```
+请输出如下结构：
+```yaml
+selected_sop:
+  alert_type_key: "<从sop_catalog中选择>"
+  title: "<从sop_catalog中选择>"
+  version: "<可选>"
+confidence: <0到1之间的小数>
+reasoning: "<简要理由>"
+referenced_flow_md: |
+  <用于初始化TTT的参考流程Markdown，优先复用所选SOP原文，可做轻微重述>
+```
+"""
+
+    try:
+        response = call_llm(router_system_prompt, router_user_prompt, temperature=0.1)
+        parsed = parse_yaml_response(response) if response else None
+        parsed = parsed if isinstance(parsed, dict) else {}
+
+        selected_sop = parsed.get("selected_sop") if isinstance(parsed.get("selected_sop"), dict) else {}
+        selected_key = str(selected_sop.get("alert_type_key", "")).strip()
+        selected_title = str(selected_sop.get("title", "")).strip()
+
+        selected_doc = None
+        if selected_key:
+            selected_doc = next((x for x in sop_catalog if x.get("alert_type_key") == selected_key), None)
+        if not selected_doc and selected_title:
+            selected_doc = next((x for x in sop_catalog if x.get("title") == selected_title), None)
+        if not selected_doc:
+            selected_doc = sop_catalog[0]
+
+        referenced_flow_md = str(parsed.get("referenced_flow_md", "")).strip()
+        if not referenced_flow_md:
+            referenced_flow_md = str(selected_doc.get("content_md", "")).strip()
+
+        return {
+            "query_text": query_text,
+            "sop_catalog_size": len(sop_catalog),
+            "selected_sop": {
+                "alert_type_key": selected_doc.get("alert_type_key", ""),
+                "title": selected_doc.get("title", ""),
+                "version": selected_doc.get("version", ""),
+            },
+            "confidence": parsed.get("confidence"),
+            "reasoning": str(parsed.get("reasoning", "")).strip(),
+            "referenced_flow_md": referenced_flow_md,
+        }
+    except Exception as e:
+        logger.error(f"事件 {event.event_id} 基于LLM路由SOP失败: {e}")
+        logger.error(traceback.format_exc())
+        fallback = sop_catalog[0] if sop_catalog else {}
+        return {
+            "query_text": query_text,
+            "sop_catalog_size": len(sop_catalog),
+            "selected_sop": {
+                "alert_type_key": fallback.get("alert_type_key", ""),
+                "title": fallback.get("title", ""),
+                "version": fallback.get("version", ""),
+            },
+            "referenced_flow_md": str(fallback.get("content_md", "")).strip(),
+            "error": str(e),
+        }
 
 
 def get_events_to_process():
@@ -100,13 +238,14 @@ def process_event(event, publisher: RabbitMQPublisher):
     sop_guidance = {}
     if is_ttt_initialization_round:
         sop_guidance = _retrieve_sop_guidance_for_event(event, top_k=1)
-        if sop_guidance.get("hits"):
-            top_payload = sop_guidance["hits"][0].get("payload", {}) if isinstance(sop_guidance["hits"], list) else {}
+        if sop_guidance.get("selected_sop"):
+            selected_sop = sop_guidance.get("selected_sop", {})
             logger.info(
-                f"事件 {event.event_id} 初始化TTT前SOP检索命中: {top_payload.get('sop_name', 'unknown')}"
+                f"事件 {event.event_id} 初始化TTT前LLM选定SOP: "
+                f"{selected_sop.get('alert_type_key', 'unknown')} / {selected_sop.get('title', 'unknown')}"
             )
         else:
-            logger.info(f"事件 {event.event_id} 初始化TTT前未命中SOP，Captain将自主规划。")
+            logger.info(f"事件 {event.event_id} 初始化TTT前未选出参考SOP，Captain将自主规划。")
 
     request_data = {
         'type': 'plan_or_update_ttt_by_event',
@@ -160,8 +299,8 @@ def process_event(event, publisher: RabbitMQPublisher):
     if is_ttt_initialization_round:
         init_ttt_instruction = """
 本轮是TTT初始化轮次：
-- 输入中的 sop_guidance 为语义检索到的SOP参考（如果命中）。
-- 初始化TTT时优先参考 sop_guidance.hits[0].payload.workflow_steps。
+- 输入中的 sop_guidance 为“告警输入 + SOP列表”经LLM路由得到的参考结果。
+- 初始化TTT时优先参考 sop_guidance.referenced_flow_md。
 - 将每个流程步骤映射为可执行的TTT节点（必要时拆分为父子节点）。
 - 若SOP与事件细节不完全一致，可做小幅调整，但不得偏离事件事实。
 """
